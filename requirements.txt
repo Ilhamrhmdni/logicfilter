@@ -1,4 +1,4 @@
 streamlit
-reportlab
-pyrebase4
-pycryptodome
+pandas
+scikit-learn
+joblib
