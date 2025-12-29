@@ -1,14 +1,35 @@
+# app.py
 import re
+from io import StringIO
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="Filter Produk Shopee", layout="wide")
-st.title("📦 Filter & Olah Data Produk (Shopee)")
+st.set_page_config(page_title="Filter Produk (Tanpa Header)", layout="wide")
+st.title("📦 Filter Produk (Input Tanpa Header) — Trigger Filter + Export TXT/CSV")
 
-# ---------------------------
+# =========================================================
+# KONFIG HEADER TETAP (USER TIDAK PERLU PASTE HEADER)
+# =========================================================
+FIXED_COLS = [
+    "No",
+    "Link Produk",
+    "Nama Produk",
+    "Harga",
+    "Stock",
+    "Terjual Bulanan",
+    "Terjual Semua",
+    "Komisi %",
+    "Komisi Rp",
+    "Ratting",
+]
+
+FILTER_COLS = ["Stock", "Terjual Bulanan", "Komisi %", "Komisi Rp"]  # hanya ini yang difilter
+
+
+# =========================================================
 # Helpers
-# ---------------------------
+# =========================================================
 def clean_number_id(x):
     """
     Bersihin angka model Indonesia:
@@ -27,68 +48,74 @@ def clean_number_id(x):
     s = s.replace(" ", "")
     s = re.sub(r"[^0-9\.,]", "", s)
 
-    # dataset kamu: titik/koma biasa dipakai pemisah ribuan
+    # dataset kamu umumnya pakai titik/koma sebagai pemisah ribuan
     s = s.replace(".", "")
     s = s.replace(",", "")
 
     return pd.to_numeric(s, errors="coerce")
 
 
-def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [c.strip() for c in df.columns]
+def detect_sep(text: str) -> str:
+    # default: kalau ada tab → TSV, kalau tidak → CSV koma
+    if "\t" in text:
+        return "\t"
+    return ","
 
-    # Samakan "Ratting" -> "Rating"
-    if "Ratting" in df.columns and "Rating" not in df.columns:
-        df = df.rename(columns={"Ratting": "Rating"})
 
+def read_no_header_text(text: str) -> pd.DataFrame:
+    """
+    Membaca data TANPA HEADER.
+    Otomatis pilih separator tab/comma.
+    """
+    text = text.strip()
+    sep = detect_sep(text)
+    df = pd.read_csv(
+        StringIO(text),
+        sep=sep,
+        header=None,
+        names=FIXED_COLS,
+        engine="python",
+        dtype=str,  # biar aman dulu
+    )
     return df
+
+
+def load_uploaded_file(uploaded) -> pd.DataFrame:
+    raw = uploaded.getvalue()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        # fallback
+        text = raw.decode("latin-1", errors="ignore")
+    return read_no_header_text(text)
 
 
 def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    num_cols = [
-        c for c in ["No", "Harga", "Stock", "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp", "Rating"]
-        if c in df.columns
-    ]
-    for c in num_cols:
-        df[c] = df[c].apply(clean_number_id)
+    # rapikan teks
+    df["Link Produk"] = df["Link Produk"].astype(str).str.strip()
+    df["Nama Produk"] = df["Nama Produk"].astype(str).str.strip()
 
-    for c in ["Link Produk", "Nama Produk"]:
+    # convert kolom angka (tetap simpan Harga & lainnya walau tidak difilter)
+    numeric_cols = ["No", "Harga", "Stock", "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp", "Ratting"]
+    for c in numeric_cols:
         if c in df.columns:
-            df[c] = df[c].astype(str).str.strip()
-
-    # Hitung Komisi Rp jika kosong/0 tapi ada Harga & Komisi %
-    if all(c in df.columns for c in ["Komisi Rp", "Harga", "Komisi %"]):
-        df["Komisi Rp_calc"] = (df["Harga"] * df["Komisi %"] / 100.0).round(0)
-        df["Komisi Rp_final"] = np.where(
-            (df["Komisi Rp"].isna()) | (df["Komisi Rp"] == 0),
-            df["Komisi Rp_calc"],
-            df["Komisi Rp"],
-        )
+            df[c] = df[c].apply(clean_number_id)
 
     return df
 
 
-@st.cache_data
-def load_uploaded(file) -> pd.DataFrame:
-    name = file.name.lower()
-    if name.endswith(".csv"):
-        return pd.read_csv(file)
-    if name.endswith(".xlsx") or name.endswith(".xls"):
-        return pd.read_excel(file)
-    raise ValueError("Format file tidak didukung (CSV/Excel).")
+def to_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
 
 
-def parse_pasted_tsv(text: str) -> pd.DataFrame:
-    # Data dari copy Excel biasanya tab-separated
-    from io import StringIO
-    return pd.read_csv(StringIO(text), sep="\t")
+def to_txt_bytes(df: pd.DataFrame) -> bytes:
+    # TXT = TSV (tab-separated) + include header agar bisa diimport ulang tanpa pusing
+    return df.to_csv(index=False, sep="\t").encode("utf-8")
 
 
 def fmt_id(x):
-    # format angka Indonesia untuk metric
     try:
         if pd.isna(x):
             return "-"
@@ -96,182 +123,128 @@ def fmt_id(x):
     except Exception:
         return str(x)
 
-# ---------------------------
-# Input section
-# ---------------------------
+
+# =========================================================
+# INPUT
+# =========================================================
 with st.sidebar:
-    st.header("Input Data")
-    mode = st.radio("Sumber data", ["Upload CSV/Excel", "Paste (TSV dari Excel / teks)"], index=1)
+    st.header("Input (Tanpa Header)")
+    st.caption("Data kamu *tidak perlu* menyertakan baris header.")
+    source_mode = st.radio("Sumber input", ["Paste", "Upload file (.txt / .csv)"], index=0)
 
 df_raw = None
 
-if mode == "Upload CSV/Excel":
-    up = st.sidebar.file_uploader("Upload file", type=["csv", "xlsx", "xls"])
-    if up:
-        df_raw = load_uploaded(up)
-else:
+if source_mode == "Paste":
     pasted = st.text_area(
-        "Paste data (tab-separated). Tips: copy dari Excel lalu paste ke sini.",
-        height=220
+        "Paste data di sini (tanpa header). Bisa TSV (tab) atau CSV (koma).",
+        height=240,
+        placeholder="Contoh baris:\n1\thttps://...\tNama Produk\t43.800\t0\t269\t50000\t0\t0\t4",
     )
     if pasted.strip():
-        df_raw = parse_pasted_tsv(pasted)
+        df_raw = read_no_header_text(pasted)
+else:
+    up = st.file_uploader("Upload file .txt atau .csv (tanpa header)", type=["txt", "csv"])
+    if up is not None:
+        df_raw = load_uploaded_file(up)
 
 if df_raw is None:
-    st.info("Masukkan data dulu via sidebar.")
+    st.info("Masukkan data via sidebar (Paste atau Upload).")
     st.stop()
 
-df = normalize_columns(df_raw)
-df = coerce_types(df)
+# =========================================================
+# CLEAN + PREVIEW
+# =========================================================
+df = coerce_types(df_raw)
 
-# ---------------------------
-# Preview
-# ---------------------------
-st.subheader("Preview (setelah dibersihkan)")
+st.subheader("Preview Data (Header ditanam di script)")
 st.dataframe(df, use_container_width=True, height=320)
 
-# ---------------------------
-# Filters (pakai tombol trigger)
-# ---------------------------
-st.subheader("Filter")
+# =========================================================
+# FILTER (TRIGGER BUTTON) — HANYA: Stock, Terjual Bulanan, Komisi %, Komisi Rp
+# =========================================================
+st.subheader("Filter (Hanya 4 kolom)")
 
 with st.sidebar:
-    st.header("Filter Produk")
-
-    # Form supaya tidak auto-proses setiap input berubah
+    st.header("Filter (Klik untuk proses)")
     with st.form("filter_form"):
-        keyword = st.text_input("Cari nama produk", placeholder="mis: turtleneck / inara / knit ...")
-
-        # Harga
-        if "Harga" in df.columns and df["Harga"].notna().any():
-            hmin = float(df["Harga"].min())
-            hmax = float(df["Harga"].max())
-            harga_rng = st.slider("Rentang Harga", hmin, hmax, (hmin, hmax))
-        else:
-            harga_rng = None
-
-        # Stock minimal
+        # STOCK
         stock_min = st.number_input("Stock minimal", min_value=0, value=0, step=1)
 
-        # Rating
-        if "Rating" in df.columns and df["Rating"].notna().any():
-            rmin = float(df["Rating"].min())
-            rmax = float(df["Rating"].max())
-            rating_rng = st.slider("Rentang Rating", rmin, rmax, (rmin, rmax))
-        else:
-            rating_rng = None
-
-        # Terjual
+        # TERJUAL BULANAN
         tb_min = st.number_input("Terjual Bulanan minimal", min_value=0, value=0, step=1)
-        ts_min = st.number_input("Terjual Semua minimal", min_value=0, value=0, step=1)
 
-        # Komisi %
-        if "Komisi %" in df.columns and df["Komisi %"].notna().any():
+        # KOMISI %
+        if df["Komisi %"].notna().any():
             kmin = float(df["Komisi %"].min())
             kmax = float(df["Komisi %"].max())
-            komisi_rng = st.slider("Rentang Komisi %", kmin, kmax, (kmin, kmax))
         else:
-            komisi_rng = None
+            kmin, kmax = 0.0, 0.0
+        komisi_pct_rng = st.slider("Rentang Komisi %", kmin, kmax, (kmin, kmax))
+
+        # KOMISI Rp
+        if df["Komisi Rp"].notna().any():
+            rmin = float(df["Komisi Rp"].min())
+            rmax = float(df["Komisi Rp"].max())
+        else:
+            rmin, rmax = 0.0, 0.0
+        komisi_rp_rng = st.slider("Rentang Komisi Rp", rmin, rmax, (rmin, rmax))
 
         run_filter = st.form_submit_button("🚀 Jalankan Filter")
 
-# Default output: tampilkan semua dulu (tidak filter) sampai tombol ditekan
+# Default: belum filter (tampil semua)
 df_f = df.copy()
 
 if run_filter:
-    # keyword nama produk
-    if keyword and "Nama Produk" in df_f.columns:
-        df_f = df_f[df_f["Nama Produk"].astype(str).str.lower().str.contains(keyword.lower(), na=False)]
+    # Stock >= min
+    df_f = df_f[df_f["Stock"].fillna(0) >= stock_min]
 
-    # harga
-    if harga_rng is not None and "Harga" in df_f.columns:
-        df_f = df_f[(df_f["Harga"] >= harga_rng[0]) & (df_f["Harga"] <= harga_rng[1])]
+    # Terjual Bulanan >= min
+    df_f = df_f[df_f["Terjual Bulanan"].fillna(0) >= tb_min]
 
-    # stock
-    if "Stock" in df_f.columns:
-        df_f = df_f[df_f["Stock"].fillna(0) >= stock_min]
+    # Komisi % range
+    df_f = df_f[(df_f["Komisi %"].fillna(0) >= komisi_pct_rng[0]) & (df_f["Komisi %"].fillna(0) <= komisi_pct_rng[1])]
 
-    # rating
-    if rating_rng is not None and "Rating" in df_f.columns:
-        df_f = df_f[(df_f["Rating"] >= rating_rng[0]) & (df_f["Rating"] <= rating_rng[1])]
-
-    # terjual bulanan
-    if "Terjual Bulanan" in df_f.columns:
-        df_f = df_f[df_f["Terjual Bulanan"].fillna(0) >= tb_min]
-
-    # terjual semua
-    if "Terjual Semua" in df_f.columns:
-        df_f = df_f[df_f["Terjual Semua"].fillna(0) >= ts_min]
-
-    # komisi %
-    if komisi_rng is not None and "Komisi %" in df_f.columns:
-        df_f = df_f[(df_f["Komisi %"] >= komisi_rng[0]) & (df_f["Komisi %"] <= komisi_rng[1])]
+    # Komisi Rp range
+    df_f = df_f[(df_f["Komisi Rp"].fillna(0) >= komisi_rp_rng[0]) & (df_f["Komisi Rp"].fillna(0) <= komisi_rp_rng[1])]
 else:
     st.info("Atur filter di sidebar lalu klik **🚀 Jalankan Filter** untuk memproses.")
 
-# ---------------------------
-# Sorting & output columns
-# ---------------------------
+# =========================================================
+# OUTPUT + METRICS
+# =========================================================
 st.subheader("Hasil")
 
-c1, c2, c3, c4 = st.columns([2, 2, 2, 6])
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Total baris (awal)", len(df))
+m2.metric("Total baris (hasil)", len(df_f))
+m3.metric("Total Terjual Bulanan (hasil)", fmt_id(df_f["Terjual Bulanan"].fillna(0).sum()))
+m4.metric("Total Komisi Rp (hasil)", fmt_id(df_f["Komisi Rp"].fillna(0).sum()))
 
-with c1:
-    sort_col = st.selectbox("Sort kolom", ["(tanpa sort)"] + df_f.columns.tolist())
-with c2:
-    sort_dir = st.radio("Urutan", ["Asc", "Desc"], horizontal=True)
-with c3:
-    default_top = min(200, max(1, len(df_f)))
-    topn = st.number_input("Tampilkan Top N", min_value=1, value=default_top, step=10)
+st.dataframe(df_f, use_container_width=True, height=420)
 
-with c4:
-    default_cols = [
-        c for c in ["No", "Nama Produk", "Harga", "Stock", "Terjual Bulanan",
-                    "Terjual Semua", "Komisi %", "Komisi Rp_final", "Rating", "Link Produk"]
-        if c in df_f.columns
-    ]
-    show_cols = st.multiselect("Kolom ditampilkan", df_f.columns.tolist(), default=default_cols)
+# =========================================================
+# EXPORT (TXT / CSV)
+# =========================================================
+st.subheader("Export Hasil (TXT atau CSV)")
 
-df_out = df_f.copy()
+colA, colB = st.columns([2, 8])
+with colA:
+    export_fmt = st.radio("Format export", ["CSV", "TXT"], index=0)
 
-if sort_col != "(tanpa sort)":
-    df_out = df_out.sort_values(by=sort_col, ascending=(sort_dir == "Asc"))
-
-if show_cols:
-    df_out = df_out[show_cols]
-
-df_out = df_out.head(int(topn))
-
-# ---------------------------
-# KPIs
-# ---------------------------
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Jumlah produk (hasil)", len(df_out))
-
-if "Harga" in df_out.columns and df_out["Harga"].notna().any():
-    k2.metric("Rata-rata harga", fmt_id(df_out["Harga"].mean()))
+if export_fmt == "CSV":
+    data_bytes = to_csv_bytes(df_f)
+    file_name = "hasil_filter_produk.csv"
+    mime = "text/csv"
 else:
-    k2.metric("Rata-rata harga", "-")
+    data_bytes = to_txt_bytes(df_f)
+    file_name = "hasil_filter_produk.txt"
+    mime = "text/plain"
 
-if "Terjual Bulanan" in df_out.columns and df_out["Terjual Bulanan"].notna().any():
-    k3.metric("Total terjual bulanan", fmt_id(df_out["Terjual Bulanan"].sum()))
-else:
-    k3.metric("Total terjual bulanan", "-")
-
-kom_col = "Komisi Rp_final" if "Komisi Rp_final" in df_out.columns else ("Komisi Rp" if "Komisi Rp" in df_out.columns else None)
-if kom_col and df_out[kom_col].notna().any():
-    k4.metric("Estimasi total komisi (Rp)", fmt_id(df_out[kom_col].sum()))
-else:
-    k4.metric("Estimasi total komisi (Rp)", "-")
-
-st.dataframe(df_out, use_container_width=True, height=420)
-
-# ---------------------------
-# Download
-# ---------------------------
 st.download_button(
-    "⬇️ Download hasil (CSV)",
-    data=df_out.to_csv(index=False).encode("utf-8"),
-    file_name="hasil_filter_produk.csv",
-    mime="text/csv",
+    f"⬇️ Download hasil ({export_fmt})",
+    data=data_bytes,
+    file_name=file_name,
+    mime=mime,
 )
+
+st.caption("Catatan: Export TXT memakai format TSV (dipisah TAB) + header, supaya bisa di-import lagi dengan mudah.")
