@@ -5,11 +5,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="Filter Produk (Tanpa Header)", layout="wide")
+st.set_page_config(page_title="Filter Produk (No Header)", layout="wide")
 st.title("📦 Filter Produk (Input Tanpa Header) — Trigger Filter + Export TXT/CSV")
 
 # =========================================================
-# KONFIG HEADER TETAP (USER TIDAK PERLU PASTE HEADER)
+# HEADER TETAP (USER TIDAK PERLU PASTE HEADER)
 # =========================================================
 FIXED_COLS = [
     "No",
@@ -23,9 +23,6 @@ FIXED_COLS = [
     "Komisi Rp",
     "Ratting",
 ]
-
-FILTER_COLS = ["Stock", "Terjual Bulanan", "Komisi %", "Komisi Rp"]  # hanya ini yang difilter
-
 
 # =========================================================
 # Helpers
@@ -48,44 +45,43 @@ def clean_number_id(x):
     s = s.replace(" ", "")
     s = re.sub(r"[^0-9\.,]", "", s)
 
-    # dataset kamu umumnya pakai titik/koma sebagai pemisah ribuan
+    # dataset kamu umumnya titik/koma pemisah ribuan
     s = s.replace(".", "")
     s = s.replace(",", "")
 
     return pd.to_numeric(s, errors="coerce")
 
 
-def detect_sep(text: str) -> str:
-    # default: kalau ada tab → TSV, kalau tidak → CSV koma
-    if "\t" in text:
-        return "\t"
-    return ","
+def detect_sep_from_text(text: str) -> str:
+    # kalau ada tab → TSV; kalau tidak → CSV (koma)
+    return "\t" if "\t" in text else ","
 
 
 def read_no_header_text(text: str) -> pd.DataFrame:
     """
-    Membaca data TANPA HEADER.
-    Otomatis pilih separator tab/comma.
+    Baca data TANPA HEADER dari teks (paste / file).
+    Otomatis deteksi pemisah (TAB atau koma).
     """
     text = text.strip()
-    sep = detect_sep(text)
+    sep = detect_sep_from_text(text)
+
     df = pd.read_csv(
         StringIO(text),
         sep=sep,
         header=None,
         names=FIXED_COLS,
         engine="python",
-        dtype=str,  # biar aman dulu
+        dtype=str,
     )
     return df
 
 
+@st.cache_data
 def load_uploaded_file(uploaded) -> pd.DataFrame:
     raw = uploaded.getvalue()
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
-        # fallback
         text = raw.decode("latin-1", errors="ignore")
     return read_no_header_text(text)
 
@@ -97,22 +93,12 @@ def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
     df["Link Produk"] = df["Link Produk"].astype(str).str.strip()
     df["Nama Produk"] = df["Nama Produk"].astype(str).str.strip()
 
-    # convert kolom angka (tetap simpan Harga & lainnya walau tidak difilter)
+    # convert angka
     numeric_cols = ["No", "Harga", "Stock", "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp", "Ratting"]
     for c in numeric_cols:
-        if c in df.columns:
-            df[c] = df[c].apply(clean_number_id)
+        df[c] = df[c].apply(clean_number_id)
 
     return df
-
-
-def to_csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
-
-
-def to_txt_bytes(df: pd.DataFrame) -> bytes:
-    # TXT = TSV (tab-separated) + include header agar bisa diimport ulang tanpa pusing
-    return df.to_csv(index=False, sep="\t").encode("utf-8")
 
 
 def fmt_id(x):
@@ -124,19 +110,30 @@ def fmt_id(x):
         return str(x)
 
 
+# ===== EXPORTERS (INI YANG BIKIN TXT BENERAN TXT) =====
+def export_csv_bytes(df: pd.DataFrame) -> bytes:
+    # CSV pakai koma
+    return df.to_csv(index=False, sep=",").encode("utf-8")
+
+def export_txt_bytes(df: pd.DataFrame) -> bytes:
+    # TXT pakai TAB (TSV) supaya aman kalau nama produk ada koma
+    # tetap ada header di output, biar bisa dipakai ulang
+    return df.to_csv(index=False, sep="\t").encode("utf-8")
+
+
 # =========================================================
 # INPUT
 # =========================================================
 with st.sidebar:
     st.header("Input (Tanpa Header)")
-    st.caption("Data kamu *tidak perlu* menyertakan baris header.")
+    st.caption("Header sudah ditanam di script. Jadi kamu paste/upload data BARIS SAJA.")
     source_mode = st.radio("Sumber input", ["Paste", "Upload file (.txt / .csv)"], index=0)
 
 df_raw = None
 
 if source_mode == "Paste":
     pasted = st.text_area(
-        "Paste data di sini (tanpa header). Bisa TSV (tab) atau CSV (koma).",
+        "Paste data (tanpa header). Bisa TAB (TSV) atau koma (CSV).",
         height=240,
         placeholder="Contoh baris:\n1\thttps://...\tNama Produk\t43.800\t0\t269\t50000\t0\t0\t4",
     )
@@ -151,12 +148,12 @@ if df_raw is None:
     st.info("Masukkan data via sidebar (Paste atau Upload).")
     st.stop()
 
-# =========================================================
-# CLEAN + PREVIEW
-# =========================================================
 df = coerce_types(df_raw)
 
-st.subheader("Preview Data (Header ditanam di script)")
+# =========================================================
+# PREVIEW
+# =========================================================
+st.subheader("Preview Data (Header otomatis dari script)")
 st.dataframe(df, use_container_width=True, height=320)
 
 # =========================================================
@@ -165,15 +162,12 @@ st.dataframe(df, use_container_width=True, height=320)
 st.subheader("Filter (Hanya 4 kolom)")
 
 with st.sidebar:
-    st.header("Filter (Klik untuk proses)")
+    st.header("Filter")
     with st.form("filter_form"):
-        # STOCK
         stock_min = st.number_input("Stock minimal", min_value=0, value=0, step=1)
-
-        # TERJUAL BULANAN
         tb_min = st.number_input("Terjual Bulanan minimal", min_value=0, value=0, step=1)
 
-        # KOMISI %
+        # Komisi %
         if df["Komisi %"].notna().any():
             kmin = float(df["Komisi %"].min())
             kmax = float(df["Komisi %"].max())
@@ -181,7 +175,7 @@ with st.sidebar:
             kmin, kmax = 0.0, 0.0
         komisi_pct_rng = st.slider("Rentang Komisi %", kmin, kmax, (kmin, kmax))
 
-        # KOMISI Rp
+        # Komisi Rp
         if df["Komisi Rp"].notna().any():
             rmin = float(df["Komisi Rp"].min())
             rmax = float(df["Komisi Rp"].max())
@@ -191,20 +185,13 @@ with st.sidebar:
 
         run_filter = st.form_submit_button("🚀 Jalankan Filter")
 
-# Default: belum filter (tampil semua)
+# default: belum difilter
 df_f = df.copy()
 
 if run_filter:
-    # Stock >= min
     df_f = df_f[df_f["Stock"].fillna(0) >= stock_min]
-
-    # Terjual Bulanan >= min
     df_f = df_f[df_f["Terjual Bulanan"].fillna(0) >= tb_min]
-
-    # Komisi % range
     df_f = df_f[(df_f["Komisi %"].fillna(0) >= komisi_pct_rng[0]) & (df_f["Komisi %"].fillna(0) <= komisi_pct_rng[1])]
-
-    # Komisi Rp range
     df_f = df_f[(df_f["Komisi Rp"].fillna(0) >= komisi_rp_rng[0]) & (df_f["Komisi Rp"].fillna(0) <= komisi_rp_rng[1])]
 else:
     st.info("Atur filter di sidebar lalu klik **🚀 Jalankan Filter** untuk memproses.")
@@ -225,18 +212,16 @@ st.dataframe(df_f, use_container_width=True, height=420)
 # =========================================================
 # EXPORT (TXT / CSV)
 # =========================================================
-st.subheader("Export Hasil (TXT atau CSV)")
+st.subheader("Export Hasil")
 
-colA, colB = st.columns([2, 8])
-with colA:
-    export_fmt = st.radio("Format export", ["CSV", "TXT"], index=0)
+export_fmt = st.radio("Pilih format export", ["CSV", "TXT"], horizontal=True, index=0)
 
 if export_fmt == "CSV":
-    data_bytes = to_csv_bytes(df_f)
+    data_bytes = export_csv_bytes(df_f)
     file_name = "hasil_filter_produk.csv"
     mime = "text/csv"
 else:
-    data_bytes = to_txt_bytes(df_f)
+    data_bytes = export_txt_bytes(df_f)
     file_name = "hasil_filter_produk.txt"
     mime = "text/plain"
 
@@ -247,4 +232,4 @@ st.download_button(
     mime=mime,
 )
 
-st.caption("Catatan: Export TXT memakai format TSV (dipisah TAB) + header, supaya bisa di-import lagi dengan mudah.")
+st.caption("TXT diexport sebagai TSV (dipisah TAB) supaya rapi dan aman kalau Nama Produk mengandung koma.")
