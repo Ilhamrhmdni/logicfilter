@@ -22,72 +22,79 @@ def clean_number_id(x):
     s = str(x).strip()
     if s == "" or s.lower() in ["nan", "none", "-", "null"]:
         return np.nan
+
     s = s.replace("Rp", "").replace("rp", "").strip()
     s = s.replace(" ", "")
-    # ambil hanya digit, titik, koma
     s = re.sub(r"[^0-9\.,]", "", s)
 
-    # kasus umum dataset kamu: titik = pemisah ribuan
-    # jadi hapus semua titik
+    # dataset kamu: titik/koma biasa dipakai pemisah ribuan
     s = s.replace(".", "")
-
-    # kalau koma dipakai pemisah ribuan juga, hapus
-    # (kalau kamu punya desimal beneran, bilang ya)
     s = s.replace(",", "")
 
     return pd.to_numeric(s, errors="coerce")
+
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [c.strip() for c in df.columns]
 
-    # Samakan nama kolom rating (kadang "Ratting")
+    # Samakan "Ratting" -> "Rating"
     if "Ratting" in df.columns and "Rating" not in df.columns:
         df = df.rename(columns={"Ratting": "Rating"})
 
-    # Pastikan kolom penting ada
-    expected = ["No", "Link Produk", "Nama Produk", "Harga", "Stock",
-                "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp", "Rating"]
-    missing = [c for c in expected if c not in df.columns]
-    if missing:
-        st.warning(f"Kolom kurang: {missing}. App tetap jalan untuk kolom yang ada.")
     return df
+
 
 def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    num_cols = [c for c in ["No", "Harga", "Stock", "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp", "Rating"] if c in df.columns]
+    num_cols = [
+        c for c in ["No", "Harga", "Stock", "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp", "Rating"]
+        if c in df.columns
+    ]
     for c in num_cols:
         df[c] = df[c].apply(clean_number_id)
 
-    # rapikan teks
     for c in ["Link Produk", "Nama Produk"]:
         if c in df.columns:
             df[c] = df[c].astype(str).str.strip()
 
-    # hitung komisi Rp kalau kosong tapi ada harga & komisi%
+    # Hitung Komisi Rp jika kosong/0 tapi ada Harga & Komisi %
     if all(c in df.columns for c in ["Komisi Rp", "Harga", "Komisi %"]):
         df["Komisi Rp_calc"] = (df["Harga"] * df["Komisi %"] / 100.0).round(0)
-        # kalau Komisi Rp kosong/0, pakai hasil kalkulasi
         df["Komisi Rp_final"] = np.where(
             (df["Komisi Rp"].isna()) | (df["Komisi Rp"] == 0),
             df["Komisi Rp_calc"],
-            df["Komisi Rp"]
+            df["Komisi Rp"],
         )
+
     return df
 
+
+@st.cache_data
 def load_uploaded(file) -> pd.DataFrame:
     name = file.name.lower()
     if name.endswith(".csv"):
         return pd.read_csv(file)
     if name.endswith(".xlsx") or name.endswith(".xls"):
         return pd.read_excel(file)
-    raise ValueError("Format file tidak didukung.")
+    raise ValueError("Format file tidak didukung (CSV/Excel).")
+
 
 def parse_pasted_tsv(text: str) -> pd.DataFrame:
-    # Data kamu mirip hasil copy dari Excel → tab-separated
+    # Data dari copy Excel biasanya tab-separated
     from io import StringIO
     return pd.read_csv(StringIO(text), sep="\t")
+
+
+def fmt_id(x):
+    # format angka Indonesia untuk metric
+    try:
+        if pd.isna(x):
+            return "-"
+        return f"{float(x):,.0f}".replace(",", ".")
+    except Exception:
+        return str(x)
 
 # ---------------------------
 # Input section
@@ -103,8 +110,10 @@ if mode == "Upload CSV/Excel":
     if up:
         df_raw = load_uploaded(up)
 else:
-    sample_hint = "Paste data kamu (tab-separated). Contoh: copy dari Excel lalu paste ke sini."
-    pasted = st.text_area(sample_hint, height=220)
+    pasted = st.text_area(
+        "Paste data (tab-separated). Tips: copy dari Excel lalu paste ke sini.",
+        height=220
+    )
     if pasted.strip():
         df_raw = parse_pasted_tsv(pasted)
 
@@ -122,69 +131,89 @@ st.subheader("Preview (setelah dibersihkan)")
 st.dataframe(df, use_container_width=True, height=320)
 
 # ---------------------------
-# Filters
+# Filters (pakai tombol trigger)
 # ---------------------------
 st.subheader("Filter")
+
 with st.sidebar:
-    st.header("Filter")
+    st.header("Filter Produk")
 
-    keyword = st.text_input("Cari nama produk", placeholder="mis: turtleneck / inara / knit ...")
+    # Form supaya tidak auto-proses setiap input berubah
+    with st.form("filter_form"):
+        keyword = st.text_input("Cari nama produk", placeholder="mis: turtleneck / inara / knit ...")
 
-    # Harga
-    if "Harga" in df.columns and df["Harga"].notna().any():
-        hmin = float(df["Harga"].min())
-        hmax = float(df["Harga"].max())
-        harga_rng = st.slider("Rentang Harga", hmin, hmax, (hmin, hmax))
+        # Harga
+        if "Harga" in df.columns and df["Harga"].notna().any():
+            hmin = float(df["Harga"].min())
+            hmax = float(df["Harga"].max())
+            harga_rng = st.slider("Rentang Harga", hmin, hmax, (hmin, hmax))
+        else:
+            harga_rng = None
 
-    # Stock minimal
-    stock_min = st.number_input("Stock minimal", min_value=0, value=0, step=1)
+        # Stock minimal
+        stock_min = st.number_input("Stock minimal", min_value=0, value=0, step=1)
 
-    # Rating
-    if "Rating" in df.columns and df["Rating"].notna().any():
-        rmin = float(df["Rating"].min())
-        rmax = float(df["Rating"].max())
-        rating_rng = st.slider("Rentang Rating", rmin, rmax, (rmin, rmax))
+        # Rating
+        if "Rating" in df.columns and df["Rating"].notna().any():
+            rmin = float(df["Rating"].min())
+            rmax = float(df["Rating"].max())
+            rating_rng = st.slider("Rentang Rating", rmin, rmax, (rmin, rmax))
+        else:
+            rating_rng = None
 
-    # Terjual Bulanan
-    tb_min = st.number_input("Terjual Bulanan minimal", min_value=0, value=0, step=1)
+        # Terjual
+        tb_min = st.number_input("Terjual Bulanan minimal", min_value=0, value=0, step=1)
+        ts_min = st.number_input("Terjual Semua minimal", min_value=0, value=0, step=1)
 
-    # Terjual Semua
-    ts_min = st.number_input("Terjual Semua minimal", min_value=0, value=0, step=1)
+        # Komisi %
+        if "Komisi %" in df.columns and df["Komisi %"].notna().any():
+            kmin = float(df["Komisi %"].min())
+            kmax = float(df["Komisi %"].max())
+            komisi_rng = st.slider("Rentang Komisi %", kmin, kmax, (kmin, kmax))
+        else:
+            komisi_rng = None
 
-    # Komisi %
-    if "Komisi %" in df.columns and df["Komisi %"].notna().any():
-        kmin = float(df["Komisi %"].min())
-        kmax = float(df["Komisi %"].max())
-        komisi_rng = st.slider("Rentang Komisi %", kmin, kmax, (kmin, kmax))
+        run_filter = st.form_submit_button("🚀 Jalankan Filter")
 
-# Apply filters
+# Default output: tampilkan semua dulu (tidak filter) sampai tombol ditekan
 df_f = df.copy()
 
-if keyword and "Nama Produk" in df_f.columns:
-    df_f = df_f[df_f["Nama Produk"].astype(str).str.lower().str.contains(keyword.lower(), na=False)]
+if run_filter:
+    # keyword nama produk
+    if keyword and "Nama Produk" in df_f.columns:
+        df_f = df_f[df_f["Nama Produk"].astype(str).str.lower().str.contains(keyword.lower(), na=False)]
 
-if "Harga" in df_f.columns and df_f["Harga"].notna().any():
-    df_f = df_f[(df_f["Harga"] >= harga_rng[0]) & (df_f["Harga"] <= harga_rng[1])]
+    # harga
+    if harga_rng is not None and "Harga" in df_f.columns:
+        df_f = df_f[(df_f["Harga"] >= harga_rng[0]) & (df_f["Harga"] <= harga_rng[1])]
 
-if "Stock" in df_f.columns:
-    df_f = df_f[df_f["Stock"].fillna(0) >= stock_min]
+    # stock
+    if "Stock" in df_f.columns:
+        df_f = df_f[df_f["Stock"].fillna(0) >= stock_min]
 
-if "Rating" in df_f.columns and df_f["Rating"].notna().any():
-    df_f = df_f[(df_f["Rating"] >= rating_rng[0]) & (df_f["Rating"] <= rating_rng[1])]
+    # rating
+    if rating_rng is not None and "Rating" in df_f.columns:
+        df_f = df_f[(df_f["Rating"] >= rating_rng[0]) & (df_f["Rating"] <= rating_rng[1])]
 
-if "Terjual Bulanan" in df_f.columns:
-    df_f = df_f[df_f["Terjual Bulanan"].fillna(0) >= tb_min]
+    # terjual bulanan
+    if "Terjual Bulanan" in df_f.columns:
+        df_f = df_f[df_f["Terjual Bulanan"].fillna(0) >= tb_min]
 
-if "Terjual Semua" in df_f.columns:
-    df_f = df_f[df_f["Terjual Semua"].fillna(0) >= ts_min]
+    # terjual semua
+    if "Terjual Semua" in df_f.columns:
+        df_f = df_f[df_f["Terjual Semua"].fillna(0) >= ts_min]
 
-if "Komisi %" in df_f.columns and df_f["Komisi %"].notna().any():
-    df_f = df_f[(df_f["Komisi %"] >= komisi_rng[0]) & (df_f["Komisi %"] <= komisi_rng[1])]
+    # komisi %
+    if komisi_rng is not None and "Komisi %" in df_f.columns:
+        df_f = df_f[(df_f["Komisi %"] >= komisi_rng[0]) & (df_f["Komisi %"] <= komisi_rng[1])]
+else:
+    st.info("Atur filter di sidebar lalu klik **🚀 Jalankan Filter** untuk memproses.")
 
 # ---------------------------
 # Sorting & output columns
 # ---------------------------
-st.subheader("Hasil Filter")
+st.subheader("Hasil")
+
 c1, c2, c3, c4 = st.columns([2, 2, 2, 6])
 
 with c1:
@@ -192,16 +221,19 @@ with c1:
 with c2:
     sort_dir = st.radio("Urutan", ["Asc", "Desc"], horizontal=True)
 with c3:
-    topn = st.number_input("Tampilkan Top N", min_value=1, value=min(200, max(1, len(df_f))), step=10)
+    default_top = min(200, max(1, len(df_f)))
+    topn = st.number_input("Tampilkan Top N", min_value=1, value=default_top, step=10)
 
 with c4:
-    show_cols = st.multiselect(
-        "Kolom ditampilkan",
-        df_f.columns.tolist(),
-        default=[c for c in ["No", "Nama Produk", "Harga", "Stock", "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp_final", "Rating", "Link Produk"] if c in df_f.columns]
-    )
+    default_cols = [
+        c for c in ["No", "Nama Produk", "Harga", "Stock", "Terjual Bulanan",
+                    "Terjual Semua", "Komisi %", "Komisi Rp_final", "Rating", "Link Produk"]
+        if c in df_f.columns
+    ]
+    show_cols = st.multiselect("Kolom ditampilkan", df_f.columns.tolist(), default=default_cols)
 
 df_out = df_f.copy()
+
 if sort_col != "(tanpa sort)":
     df_out = df_out.sort_values(by=sort_col, ascending=(sort_dir == "Asc"))
 
@@ -214,13 +246,23 @@ df_out = df_out.head(int(topn))
 # KPIs
 # ---------------------------
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Jumlah produk", len(df_out))
-if "Harga" in df_out.columns:
-    k2.metric("Rata-rata harga", f"{df_out['Harga'].mean():,.0f}".replace(",", "."))
-if "Terjual Bulanan" in df_out.columns:
-    k3.metric("Total terjual bulanan", f"{df_out['Terjual Bulanan'].sum():,.0f}".replace(",", "."))
-if "Komisi Rp_final" in df_out.columns:
-    k4.metric("Estimasi total komisi (Rp)", f"{df_out['Komisi Rp_final'].sum():,.0f}".replace(",", "."))
+k1.metric("Jumlah produk (hasil)", len(df_out))
+
+if "Harga" in df_out.columns and df_out["Harga"].notna().any():
+    k2.metric("Rata-rata harga", fmt_id(df_out["Harga"].mean()))
+else:
+    k2.metric("Rata-rata harga", "-")
+
+if "Terjual Bulanan" in df_out.columns and df_out["Terjual Bulanan"].notna().any():
+    k3.metric("Total terjual bulanan", fmt_id(df_out["Terjual Bulanan"].sum()))
+else:
+    k3.metric("Total terjual bulanan", "-")
+
+kom_col = "Komisi Rp_final" if "Komisi Rp_final" in df_out.columns else ("Komisi Rp" if "Komisi Rp" in df_out.columns else None)
+if kom_col and df_out[kom_col].notna().any():
+    k4.metric("Estimasi total komisi (Rp)", fmt_id(df_out[kom_col].sum()))
+else:
+    k4.metric("Estimasi total komisi (Rp)", "-")
 
 st.dataframe(df_out, use_container_width=True, height=420)
 
