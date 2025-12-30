@@ -419,8 +419,8 @@ df_rej_out = st.session_state.df_rejected
 # METRICS + TABLE
 # =========================================================
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Total baris (awal)", len(df))
-m2.metric("Total baris (lolos)", len(df_out))
+m1.metric("Total Produk", len(df))
+m2.metric("Total Produk Lolos", len(df_out))
 m3.metric("Total Terjual Bulanan (lolos)", fmt_id(df_out["Harga"].fillna(0).sum()))
 m4.metric("Total Komisi Rp (lolos)", fmt_id(df_out["Komisi Rp"].fillna(0).sum()))
 
@@ -429,7 +429,7 @@ st.dataframe(df_out, use_container_width=True, height=420)
 # =========================================================
 # LOG DATA TIDAK LOLOS (ditampilkan + bisa export)
 # =========================================================
-with st.expander("🧾 Log data tidak lolos filter (untuk dipakai lagi)"):
+with st.expander("🧾 Log data tidak lolos filter"):
     if df_rej_out is None or df_rej_out.empty:
         st.info("Belum ada data log. Klik **🚀 JALANKAN FILTER** dulu.")
     else:
@@ -445,7 +445,7 @@ colA, colB = st.columns([2, 3])
 with colA:
     export_fmt = st.radio("Format export", ["CSV", "TXT"], horizontal=True, index=0, key="fmt_pass")
 with colB:
-    base_name = st.text_input("Nama file (tanpa ekstensi)", value="hasil_filter_produk", key="name_pass")
+    base_name = st.text_input("Nama file", value="Masukan_nama_file", key="name_pass")
 
 base_name = sanitize_basename(base_name)
 
@@ -453,12 +453,10 @@ if export_fmt == "CSV":
     bytes_out = export_csv_bytes(df_out)
     fname = f"{base_name}.csv"
     mime = "text/csv"
-    note = "CSV berisi semua kolom + header."
 else:
     bytes_out = export_txt_bytes(df_out)
     fname = f"{base_name}.txt"
     mime = "text/plain"
-    note = "TXT (TSV TAB) tanpa header & tanpa kolom No (sesuai format kamu)."
 
 st.download_button(
     f"⬇️ Download ({export_fmt})",
@@ -481,8 +479,8 @@ else:
         log_fmt = st.radio("Format log", ["CSV", "TXT"], horizontal=True, index=0, key="fmt_log")
     with colD:
         log_name = st.text_input(
-            "Nama file log (tanpa ekstensi)",
-            value=f"{base_name}_log_tidak_lolos",
+            "Nama file log",
+            value=f"{base_name}",
             key="name_log"
         )
 
@@ -492,12 +490,10 @@ else:
         log_bytes = export_reject_csv_bytes(df_rej_out)
         log_fname = f"{log_name}.csv"
         log_mime = "text/csv"
-        log_note = "CSV log berisi semua kolom + Alasan (dengan header)."
     else:
         log_bytes = export_reject_txt_bytes(df_rej_out)
         log_fname = f"{log_name}.txt"
         log_mime = "text/plain"
-        log_note = "TXT log = TSV TAB tanpa header, tanpa No, + kolom terakhir Alasan."
 
     st.download_button(
         f"⬇️ Download LOG ({log_fmt})",
