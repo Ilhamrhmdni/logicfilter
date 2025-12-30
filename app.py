@@ -1,9 +1,10 @@
 # app.py
 import re
 from io import StringIO
-import streamlit as st
-import pandas as pd
+
 import numpy as np
+import pandas as pd
+import streamlit as st
 
 st.set_page_config(page_title="Filter Produk (Locked Pipeline)", layout="wide")
 st.title("📦 Filter & Olah Data Produk (Shopee)")
@@ -24,6 +25,7 @@ COLUMNS_10 = [
     "Ratting",
 ]
 
+# Format input TANPA kolom No (9 kolom)
 COLUMNS_9_NO_NO = [
     "Link Produk",
     "Nama Produk",
@@ -102,7 +104,6 @@ def read_no_header_text(text: str) -> pd.DataFrame:
     )
 
     ncols = df_raw.shape[1]
-
     if ncols == 10:
         df_raw.columns = COLUMNS_10
         return df_raw
@@ -121,11 +122,9 @@ def read_no_header_text(text: str) -> pd.DataFrame:
 def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # rapikan teks
     df["Link Produk"] = df["Link Produk"].astype(str).str.strip()
     df["Nama Produk"] = df["Nama Produk"].astype(str).str.strip()
 
-    # ubah kolom numerik
     for c in ["No", "Harga", "Stock", "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp", "Ratting"]:
         df[c] = df[c].apply(clean_number_id)
 
@@ -139,7 +138,7 @@ def export_csv_bytes(df: pd.DataFrame) -> bytes:
 
 def export_txt_bytes(df: pd.DataFrame) -> bytes:
     """
-    TXT sesuai permintaan kamu:
+    TXT sesuai format yang kamu minta:
     - TANPA header
     - TANPA kolom "No"
     - dipisah TAB (TSV)
@@ -169,6 +168,23 @@ def fmt_id(x):
     except Exception:
         return str(x)
 
+
+def sanitize_basename(name: str, fallback: str = "hasil_filter_produk") -> str:
+    name = (name or "").strip()
+    if not name:
+        name = fallback
+
+    # kalau user ngetik ekstensi, buang
+    name = re.sub(r"\.(csv|txt)\s*$", "", name, flags=re.IGNORECASE)
+
+    # karakter ilegal windows -> _
+    name = re.sub(r'[\\/*?:"<>|]+', "_", name)
+
+    # rapikan spasi
+    name = name.strip().strip(".")
+    return name or fallback
+
+
 # =========================================================
 # SIDEBAR INPUT + CONTROL
 # Tidak ada parsing/cleaning/preview sebelum ▶️ MULAI PROSES
@@ -186,9 +202,27 @@ with st.sidebar:
         st.session_state.raw_text = st.text_area(
             "Paste data TANPA header",
             height=240,
-            placeholder="Bisa 10 kolom (dengan No) atau 9 kolom (tanpa No).\n"
-                        "Contoh 9 kolom:\nhttps://...\tNama Produk\t43800\t0\t269\t50000\t0\t0\t4"
+            placeholder=(
+                "Bisa 10 kolom (dengan No) atau 9 kolom (tanpa No).\n\n"
+                "Contoh 9 kolom:\n"
+                "https://...\tNama Produk\t43800\t0\t269\t50000\t0\t0\t4"
+            ),
         )
+
+        # ====== INFO UKURAN PASTE + WARNING ======
+        raw = st.session_state.raw_text or ""
+        char_count = len(raw)
+        size_bytes = len(raw.encode("utf-8"))
+        size_mb = size_bytes / (1024 * 1024)
+
+        st.caption(
+            f"📏 Panjang paste: **{char_count:,}** karakter • **{size_mb:.2f} MB** (UTF-8)".replace(",", ".")
+        )
+
+        THRESH_MB = 1.5  # ambang warning (1–2 MB sesuai request)
+        if size_mb >= THRESH_MB:
+            st.warning("⚠️ Paste kamu sudah besar. Disarankan **upload file (.txt/.csv)** agar lebih stabil dan tidak lag/timeout.")
+
     else:
         up = st.file_uploader("Upload file TANPA header", type=["txt", "csv"])
         if up is not None:
@@ -213,7 +247,7 @@ if reset_btn:
     st.rerun()
 
 # =========================================================
-# STAGE INPUT (LOCKED)
+# STAGE INPUT (LOCKED) — TIDAK ADA PROSES
 # =========================================================
 if st.session_state.stage == "input":
     st.info("Masukkan data via sidebar lalu klik **▶️ MULAI PROSES**. Tidak ada parsing/cleaning/preview sebelum tombol itu ditekan.")
@@ -233,7 +267,9 @@ if st.session_state.stage == "input":
             st.error("Data terbaca kosong. Pastikan TSV (tab) atau CSV (koma) tanpa header.")
             st.stop()
 
+        # parsing + cleaning hanya setelah tombol ditekan
         df0 = coerce_types(df0)
+
         st.session_state.df = df0
         st.session_state.df_filtered = df0.copy()
         st.session_state.stage = "ready"
@@ -262,10 +298,8 @@ with st.sidebar:
     with st.form("filter_form"):
         min_stock = st.number_input("Stock minimal", min_value=0, value=0, step=1)
         min_tb = st.number_input("Terjual Bulanan minimal", min_value=0, value=0, step=1)
-
         min_kpct = st.number_input("Komisi % minimal", min_value=0.0, value=0.0, step=1.0, format="%.2f")
-        min_krp  = st.number_input("Komisi Rp minimal", min_value=0.0, value=0.0, step=100.0, format="%.0f")
-
+        min_krp = st.number_input("Komisi Rp minimal", min_value=0.0, value=0.0, step=100.0, format="%.0f")
         run_filter_btn = st.form_submit_button("🚀 JALANKAN FILTER")
 
 if run_filter_btn:
@@ -290,26 +324,36 @@ m4.metric("Total Komisi Rp", fmt_id(df_out["Komisi Rp"].fillna(0).sum()))
 st.dataframe(df_out, use_container_width=True, height=420)
 
 # =========================================================
-# EXPORT (CSV / TXT)
+# EXPORT (CSV / TXT) + Nama file custom
 # =========================================================
 st.subheader("Export Hasil")
 
-export_fmt = st.radio("Pilih format export", ["CSV", "TXT"], horizontal=True, index=0)
+colA, colB = st.columns([2, 3])
+
+with colA:
+    export_fmt = st.radio("Format export", ["CSV", "TXT"], horizontal=True, index=0)
+
+with colB:
+    base_name = st.text_input("Nama file (tanpa ekstensi)", value="hasil_filter_produk")
+
+base_name = sanitize_basename(base_name)
 
 if export_fmt == "CSV":
     bytes_out = export_csv_bytes(df_out)
-    fname = "hasil_filter_produk.csv"
+    fname = f"{base_name}.csv"
     mime = "text/csv"
+    note = "CSV berisi semua kolom + header."
 else:
     bytes_out = export_txt_bytes(df_out)
-    fname = "hasil_filter_produk.txt"
+    fname = f"{base_name}.txt"
     mime = "text/plain"
+    note = "TXT diexport sebagai TSV (TAB), TANPA header, TANPA kolom No."
 
 st.download_button(
-    f"⬇️ Download hasil ({export_fmt})",
+    f"⬇️ Download ({export_fmt})",
     data=bytes_out,
     file_name=fname,
     mime=mime,
 )
 
-st.caption("TXT diexport sebagai TSV (TAB), TANPA header, TANPA kolom No — sesuai format yang kamu minta.")
+st.caption(note)
