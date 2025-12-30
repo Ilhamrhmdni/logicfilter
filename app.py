@@ -13,6 +13,57 @@ import streamlit as st
 st.set_page_config(page_title="Shopee Product Filter", layout="wide")
 
 # =========================
+# STYLE (Summary Card)
+# =========================
+st.markdown(
+    """
+<style>
+.summary-card{
+  border: 1px solid rgba(255,255,255,.08);
+  background: rgba(255,255,255,.03);
+  border-radius: 14px;
+  padding: 14px 14px 10px 14px;
+  margin: 6px 0 18px 0;
+}
+.summary-title{
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin-bottom: 10px;
+  opacity: .95;
+}
+.summary-grid{
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+.summary-item{
+  border: 1px solid rgba(255,255,255,.06);
+  background: rgba(0,0,0,.10);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+.summary-k{
+  font-size: 0.75rem;
+  opacity: .75;
+  margin-bottom: 2px;
+}
+.summary-v{
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: .2px;
+}
+.summary-sub{
+  font-size: 0.70rem;
+  opacity: .55;
+  margin-top: 3px;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# =========================
 # HEADER TETAP
 # =========================
 COLUMNS_10 = [
@@ -133,6 +184,36 @@ def safe_filesize_mb(path: str) -> float:
         return 0.0
 
 
+def summary_card(title: str, items: list[dict]):
+    """
+    items: [{"k": "Label", "v": "Value", "sub": "optional"}, ...]
+    """
+    blocks = []
+    for it in items:
+        k = it.get("k", "")
+        v = it.get("v", "")
+        sub = it.get("sub", "")
+        sub_html = f'<div class="summary-sub">{sub}</div>' if sub else ""
+        blocks.append(
+            f"""
+            <div class="summary-item">
+              <div class="summary-k">{k}</div>
+              <div class="summary-v">{v}</div>
+              {sub_html}
+            </div>
+            """
+        )
+    html = f"""
+    <div class="summary-card">
+      <div class="summary-title">{title}</div>
+      <div class="summary-grid">
+        {''.join(blocks)}
+      </div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def write_reject_header(csv_path: str):
     need_header = (not os.path.exists(csv_path)) or (os.path.getsize(csv_path) == 0)
     if need_header:
@@ -168,7 +249,6 @@ def init_cleaned_file(cleaned_path: str):
 def append_cleaned_rows(cleaned_path: str, df_valid: pd.DataFrame):
     if df_valid is None or df_valid.empty:
         return
-    # tulis TSV internal (header sudah ada di awal)
     with open(cleaned_path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter="\t")
         for _, r in df_valid.iterrows():
@@ -190,12 +270,6 @@ def process_streaming_prepare(
     sep: str,
     chunk_size: int = 100_000,
 ):
-    """
-    ▶️ MULAI PROSES (streaming):
-    - skip baris rusak (kolom != 9/10) -> log PARSE
-    - clean angka; kalau kolom angka invalid -> skip -> log CLEAN + Kolom Error
-    - tulis baris valid ke cleaned.tsv (internal)
-    """
     init_cleaned_file(cleaned_path)
 
     total_lines = 0
@@ -334,15 +408,6 @@ def run_streaming_filter(
     include_terms: list[str],
     chunk_size: int = 200_000,
 ):
-    """
-    🚀 JALANKAN FILTER (streaming):
-    - baca cleaned.tsv per chunk
-    - apply filter numeric + nama wajib mengandung (OR)
-    - tulis passed.csv (header) & passed.txt (tanpa header & tanpa No)
-    - append rejected ke log (FILTER) + Kolom Error + Alasan
-    - hitung totals dari PASSED (Terjual Bulanan & Komisi Rp)
-    """
-    # init outputs
     with open(passed_csv, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(COLUMNS_10)
     with open(passed_txt, "w", newline="", encoding="utf-8"):
@@ -390,7 +455,6 @@ def run_streaming_filter(
         passed = chunk[mask].copy()
         rejected = chunk[~mask].copy()
 
-        # write passed + totals
         if not passed.empty:
             sum_tb += int(pd.to_numeric(passed["Terjual Bulanan"], errors="coerce").fillna(0).sum())
             sum_krp += int(pd.to_numeric(passed["Komisi Rp"], errors="coerce").fillna(0).sum())
@@ -398,14 +462,12 @@ def run_streaming_filter(
 
             passed.to_csv(passed_csv, mode="a", header=False, index=False, columns=COLUMNS_10)
 
-            # TXT (tanpa header, tanpa No)
             cols_txt = [
                 "Link Produk", "Nama Produk", "Harga", "Stock", "Terjual Bulanan",
                 "Terjual Semua", "Komisi %", "Komisi Rp", "Ratting",
             ]
             passed[cols_txt].to_csv(passed_txt, mode="a", header=False, index=False, sep="\t")
 
-        # rejected -> log FILTER + Kolom Error + Alasan (vectorized)
         if not rejected.empty:
             total_rejected_filter += len(rejected)
 
@@ -442,18 +504,14 @@ def run_streaming_filter(
             rej_df["Kolom Error"] = kol
             rej_df["Alasan"] = np.where(alasan.to_numpy() == "", "Tidak lolos filter", alasan.to_numpy())
 
-            # CSV log
             write_reject_header(reject_csv)
             rej_df.to_csv(reject_csv, mode="a", header=False, index=False, columns=REJ_LOG_COLS_CSV)
 
-            # TXT log (TSV tanpa header)
             rej_txt_df = rej_df.reindex(columns=REJ_LOG_COLS_TXT)
             rej_txt_df.to_csv(reject_txt, mode="a", header=False, index=False, sep="\t")
 
-        # progress
         if approx_total > 0:
             prog.progress(min(1.0, total_seen / approx_total))
-        # status text dibuat minimal
         status.write("Processing...")
 
     prog.progress(1.0)
@@ -470,7 +528,7 @@ def run_streaming_filter(
 
 
 # =========================
-# UI HEADER (PROFESIONAL)
+# UI HEADER
 # =========================
 st.markdown("## Shopee Product Filter")
 st.caption("Input tanpa header • Proses streaming • Export CSV/TXT + Log")
@@ -534,7 +592,6 @@ if st.session_state.stage == "input":
     if start_btn:
         paths = st.session_state.paths
 
-        # tulis raw input
         if source_mode.startswith("Paste"):
             if not (st.session_state.raw_text or "").strip():
                 st.error("Data kosong.")
@@ -557,7 +614,6 @@ if st.session_state.stage == "input":
             sample = txt.splitlines()[0] if txt else ""
             sep = detect_sep_from_sample(sample)
 
-        # reset output files
         for p in [paths["cleaned_tsv"], paths["passed_csv"], paths["passed_txt"], paths["reject_csv"], paths["reject_txt"]]:
             try:
                 if os.path.exists(p):
@@ -583,31 +639,29 @@ if st.session_state.stage == "input":
     st.stop()
 
 # =========================
-# STAGE: READY (RINCIAN SAJA — TANPA PREVIEW)
+# READY (RINCIAN — Summary Card)
 # =========================
 paths = st.session_state.paths
 prep = st.session_state.prep_stats or {}
 
-st.subheader("Rincian Data")
-
-cA, cB, cC, cD = st.columns(4)
-cA.metric("Total baris (raw)", f"{prep.get('total_lines', 0):,}".replace(",", "."))
-cB.metric("Baris valid", f"{prep.get('valid_rows', 0):,}".replace(",", "."))
-cC.metric("Skip (PARSE)", f"{prep.get('bad_parse', 0):,}".replace(",", "."))
-cD.metric("Skip (CLEAN)", f"{prep.get('bad_clean', 0):,}".replace(",", "."))
-
-# ukuran file internal
-c1, c2, c3 = st.columns(3)
-c1.metric("Cleaned file (TSV) MB", f"{safe_filesize_mb(paths['cleaned_tsv']):.1f}")
-c2.metric("Log (CSV) MB", f"{safe_filesize_mb(paths['reject_csv']):.1f}")
-c3.metric("Log (TXT) MB", f"{safe_filesize_mb(paths['reject_txt']):.1f}")
+summary_card(
+    "Rincian Data",
+    [
+        {"k": "Total baris (raw)", "v": f"{prep.get('total_lines', 0):,}".replace(",", ".")},
+        {"k": "Baris valid", "v": f"{prep.get('valid_rows', 0):,}".replace(",", ".")},
+        {"k": "Skip (PARSE)", "v": f"{prep.get('bad_parse', 0):,}".replace(",", ".")},
+        {"k": "Skip (CLEAN)", "v": f"{prep.get('bad_clean', 0):,}".replace(",", ".")},
+        {"k": "Cleaned TSV (MB)", "v": f"{safe_filesize_mb(paths['cleaned_tsv']):.1f}"},
+        {"k": "Log CSV (MB)", "v": f"{safe_filesize_mb(paths['reject_csv']):.1f}"},
+        {"k": "Log TXT (MB)", "v": f"{safe_filesize_mb(paths['reject_txt']):.1f}"},
+    ],
+)
 
 # =========================
 # FILTER TRIGGER
 # =========================
 if run_filter_btn:
     terms = parse_terms(include_words_raw)
-
     with st.spinner("Filtering..."):
         stats = run_streaming_filter(
             cleaned_path=paths["cleaned_tsv"],
@@ -622,36 +676,31 @@ if run_filter_btn:
             include_terms=terms,
             chunk_size=200_000,
         )
-
     st.session_state.filter_stats = stats
     st.session_state.stage = "filtered"
     st.rerun()
 
 # =========================
-# STAGE: FILTERED (RINCIAN SAJA — TANPA PREVIEW)
+# FILTERED (RINCIAN — Summary Card)
 # =========================
 if st.session_state.stage == "filtered":
     fs = st.session_state.filter_stats or {}
 
-    st.divider()
-    st.subheader("Rincian Hasil Filter")
+    summary_card(
+        "Rincian Hasil Filter",
+        [
+            {"k": "Valid diproses", "v": f"{fs.get('seen_valid_rows', 0):,}".replace(",", ".")},
+            {"k": "Lolos", "v": f"{fs.get('passed_rows', 0):,}".replace(",", ".")},
+            {"k": "Total Terjual Bulanan", "v": fmt_id(fs.get("sum_terjual_bulanan_passed", 0))},
+            {"k": "Total Komisi Rp", "v": fmt_id(fs.get("sum_komisi_rp_passed", 0))},
+            {"k": "Hasil CSV (MB)", "v": f"{safe_filesize_mb(paths['passed_csv']):.1f}"},
+            {"k": "Hasil TXT (MB)", "v": f"{safe_filesize_mb(paths['passed_txt']):.1f}"},
+            {"k": "Log CSV (MB)", "v": f"{safe_filesize_mb(paths['reject_csv']):.1f}"},
+            {"k": "Log TXT (MB)", "v": f"{safe_filesize_mb(paths['reject_txt']):.1f}"},
+        ],
+    )
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Valid diproses", f"{fs.get('seen_valid_rows', 0):,}".replace(",", "."))
-    m2.metric("Lolos", f"{fs.get('passed_rows', 0):,}".replace(",", "."))
-    m3.metric("Total Terjual Bulanan (lolos)", fmt_id(fs.get("sum_Harga_passed", 0)))
-    m4.metric("Total Komisi Rp (lolos)", fmt_id(fs.get("sum_komisi_rp_passed", 0)))
-
-    # ukuran output
-    o1, o2, o3, o4 = st.columns(4)
-    o1.metric("Hasil (CSV) MB", f"{safe_filesize_mb(paths['passed_csv']):.1f}")
-    o2.metric("Hasil (TXT) MB", f"{safe_filesize_mb(paths['passed_txt']):.1f}")
-    o3.metric("Log (CSV) MB", f"{safe_filesize_mb(paths['reject_csv']):.1f}")
-    o4.metric("Log (TXT) MB", f"{safe_filesize_mb(paths['reject_txt']):.1f}")
-
-    st.divider()
     st.subheader("Export")
-
     base_name = sanitize_basename(st.text_input("Nama file hasil", value="hasil_filter_produk"), "hasil_filter_produk")
     log_name = sanitize_basename(st.text_input("Nama file log", value=f"{base_name}_log_tidak_lolos"),
                                  f"{base_name}_log_tidak_lolos")
