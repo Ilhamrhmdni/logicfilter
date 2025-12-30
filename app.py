@@ -53,6 +53,9 @@ if "df" not in st.session_state:
 if "df_filtered" not in st.session_state:
     st.session_state.df_filtered = None
 
+if "df_rejected" not in st.session_state:
+    st.session_state.df_rejected = None
+
 # =========================================================
 # HELPERS
 # =========================================================
@@ -128,6 +131,11 @@ def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
     for c in ["No", "Harga", "Stock", "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp", "Ratting"]:
         df[c] = df[c].apply(clean_number_id)
 
+    # rapikan jadi integer nullable biar export gak banyak .0
+    int_cols = ["No", "Harga", "Stock", "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp", "Ratting"]
+    for c in int_cols:
+        df[c] = df[c].round(0).astype("Int64")
+
     return df
 
 
@@ -138,12 +146,10 @@ def export_csv_bytes(df: pd.DataFrame) -> bytes:
 
 def export_txt_bytes(df: pd.DataFrame) -> bytes:
     """
-    TXT sesuai format yang kamu minta:
+    TXT hasil lolos sesuai format kamu:
     - TANPA header
     - TANPA kolom "No"
     - dipisah TAB (TSV)
-    Urutan kolom:
-    Link Produk, Nama Produk, Harga, Stock, Terjual Bulanan, Terjual Semua, Komisi %, Komisi Rp, Ratting
     """
     cols_txt = [
         "Link Produk",
@@ -160,11 +166,39 @@ def export_txt_bytes(df: pd.DataFrame) -> bytes:
     return df_txt.to_csv(index=False, header=False, sep="\t").encode("utf-8")
 
 
+def export_reject_csv_bytes(df_rej: pd.DataFrame) -> bytes:
+    return df_rej.to_csv(index=False, sep=",").encode("utf-8")
+
+
+def export_reject_txt_bytes(df_rej: pd.DataFrame) -> bytes:
+    """
+    TXT log reject:
+    - TANPA header
+    - TANPA kolom No
+    - + kolom terakhir: Alasan
+    - dipisah TAB
+    """
+    cols_txt = [
+        "Link Produk",
+        "Nama Produk",
+        "Harga",
+        "Stock",
+        "Terjual Bulanan",
+        "Terjual Semua",
+        "Komisi %",
+        "Komisi Rp",
+        "Ratting",
+        "Alasan",
+    ]
+    df_txt = df_rej[cols_txt].copy()
+    return df_txt.to_csv(index=False, header=False, sep="\t").encode("utf-8")
+
+
 def fmt_id(x):
     try:
         if pd.isna(x):
             return "-"
-        return f"{float(x):,.0f}".replace(",", ".")
+        return f"{int(x):,}".replace(",", ".")
     except Exception:
         return str(x)
 
@@ -174,16 +208,26 @@ def sanitize_basename(name: str, fallback: str = "hasil_filter_produk") -> str:
     if not name:
         name = fallback
 
-    # kalau user ngetik ekstensi, buang
+    # buang ekstensi kalau user mengetik .csv/.txt
     name = re.sub(r"\.(csv|txt)\s*$", "", name, flags=re.IGNORECASE)
 
     # karakter ilegal windows -> _
     name = re.sub(r'[\\/*?:"<>|]+', "_", name)
 
-    # rapikan spasi
+    # rapikan
     name = name.strip().strip(".")
     return name or fallback
 
+
+def parse_terms(raw: str):
+    """Split keyword by comma/semicolon/newline, strip empty."""
+    parts = re.split(r"[,\n;]+", (raw or ""))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def add_reason(reason_map: dict, idxs, reason: str):
+    for i in idxs:
+        reason_map.setdefault(i, []).append(reason)
 
 # =========================================================
 # SIDEBAR INPUT + CONTROL
@@ -219,7 +263,7 @@ with st.sidebar:
             f"📏 Panjang paste: **{char_count:,}** karakter • **{size_mb:.2f} MB** (UTF-8)".replace(",", ".")
         )
 
-        THRESH_MB = 1.5  # ambang warning (1–2 MB sesuai request)
+        THRESH_MB = 1.5  # ambang warning (1–2 MB)
         if size_mb >= THRESH_MB:
             st.warning("⚠️ Paste kamu sudah besar. Disarankan **upload file (.txt/.csv)** agar lebih stabil dan tidak lag/timeout.")
 
@@ -244,10 +288,11 @@ if reset_btn:
     st.session_state.raw_text = ""
     st.session_state.df = None
     st.session_state.df_filtered = None
+    st.session_state.df_rejected = None
     st.rerun()
 
 # =========================================================
-# STAGE INPUT (LOCKED) — TIDAK ADA PROSES
+# STAGE INPUT (LOCKED)
 # =========================================================
 if st.session_state.stage == "input":
     st.info("Masukkan data via sidebar lalu klik **▶️ MULAI PROSES**. Tidak ada parsing/cleaning/preview sebelum tombol itu ditekan.")
@@ -272,6 +317,7 @@ if st.session_state.stage == "input":
 
         st.session_state.df = df0
         st.session_state.df_filtered = df0.copy()
+        st.session_state.df_rejected = pd.DataFrame(columns=list(df0.columns) + ["Alasan"])
         st.session_state.stage = "ready"
         st.rerun()
 
@@ -289,7 +335,7 @@ st.subheader("Preview Data (setelah dibersihkan)")
 st.dataframe(df, use_container_width=True, height=320)
 
 # =========================================================
-# FILTER MIN (INPUT ANGKA) + MANUAL TRIGGER
+# FILTER MIN + WAJIB MENGANDUNG KATA PADA NAMA PRODUK (include) + LOG REJECT
 # =========================================================
 st.subheader("Hasil Filter")
 
@@ -300,41 +346,106 @@ with st.sidebar:
         min_tb = st.number_input("Terjual Bulanan minimal", min_value=0, value=0, step=1)
         min_kpct = st.number_input("Komisi % minimal", min_value=0.0, value=0.0, step=1.0, format="%.2f")
         min_krp = st.number_input("Komisi Rp minimal", min_value=0.0, value=0.0, step=100.0, format="%.0f")
+
+        # ✅ PERUBAHAN: wajib mengandung kata -> jika tidak mengandung, dibuang
+        include_words_raw = st.text_input(
+            'Nama Produk WAJIB mengandung kata (pisahkan koma/enter)',
+            value="",
+            placeholder="contoh: anak, bayi, kids",
+        )
+
         run_filter_btn = st.form_submit_button("🚀 JALANKAN FILTER")
 
 if run_filter_btn:
+    reason_map = {}
     f = df.copy()
-    f = f[f["Stock"].fillna(0) >= float(min_stock)]
-    f = f[f["Terjual Bulanan"].fillna(0) >= float(min_tb)]
-    f = f[f["Komisi %"].fillna(0) >= float(min_kpct)]
-    f = f[f["Komisi Rp"].fillna(0) >= float(min_krp)]
+
+    # --- Stock
+    stock_fail = f[f["Stock"].fillna(0).astype(float) < float(min_stock)].index
+    add_reason(reason_map, stock_fail, f"Stock < {int(min_stock)}")
+    f = f[f["Stock"].fillna(0).astype(float) >= float(min_stock)]
+
+    # --- Terjual Bulanan
+    tb_fail = f[f["Terjual Bulanan"].fillna(0).astype(float) < float(min_tb)].index
+    add_reason(reason_map, tb_fail, f"Terjual Bulanan < {int(min_tb)}")
+    f = f[f["Terjual Bulanan"].fillna(0).astype(float) >= float(min_tb)]
+
+    # --- Komisi %
+    kp_fail = f[f["Komisi %"].fillna(0).astype(float) < float(min_kpct)].index
+    add_reason(reason_map, kp_fail, f"Komisi % < {min_kpct:g}")
+    f = f[f["Komisi %"].fillna(0).astype(float) >= float(min_kpct)]
+
+    # --- Komisi Rp
+    kr_fail = f[f["Komisi Rp"].fillna(0).astype(float) < float(min_krp)].index
+    add_reason(reason_map, kr_fail, f"Komisi Rp < {min_krp:g}")
+    f = f[f["Komisi Rp"].fillna(0).astype(float) >= float(min_krp)]
+
+    # --- Nama Produk wajib mengandung (OR: salah satu term cukup)
+    terms = parse_terms(include_words_raw)
+    if terms:
+        pattern = "|".join(re.escape(t) for t in terms)
+        name_series = f["Nama Produk"].fillna("").astype(str)
+
+        # yang gagal = yang tidak mengandung pattern
+        name_fail = f[~name_series.str.contains(pattern, case=False, regex=True)].index
+        add_reason(reason_map, name_fail, f"Nama tidak mengandung: {', '.join(terms)}")
+
+        # yang lolos = yang mengandung
+        f = f[name_series.str.contains(pattern, case=False, regex=True)]
+
+    # simpan lolos
     st.session_state.df_filtered = f
 
+    # rejected = semua index original yang tidak lolos
+    passed_idx = set(f.index.tolist())
+    all_idx = df.index.tolist()
+    rejected_idx = [i for i in all_idx if i not in passed_idx]
+
+    df_rej = df.loc[rejected_idx].copy()
+    alasan_list = []
+    for i in rejected_idx:
+        reasons = reason_map.get(i)
+        if not reasons:
+            reasons = ["Tidak lolos filter"]
+        alasan_list.append(" | ".join(reasons))
+
+    df_rej["Alasan"] = alasan_list
+    st.session_state.df_rejected = df_rej
+
 df_out = st.session_state.df_filtered if st.session_state.df_filtered is not None else df
+df_rej_out = st.session_state.df_rejected
 
 # =========================================================
 # METRICS + TABLE
 # =========================================================
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Total baris (awal)", len(df))
-m2.metric("Total baris (hasil)", len(df_out))
-m3.metric("Total Terjual Bulanan", fmt_id(df_out["Terjual Bulanan"].fillna(0).sum()))
-m4.metric("Total Komisi Rp", fmt_id(df_out["Komisi Rp"].fillna(0).sum()))
+m2.metric("Total baris (lolos)", len(df_out))
+m3.metric("Total Terjual Bulanan (lolos)", fmt_id(df_out["Terjual Bulanan"].fillna(0).sum()))
+m4.metric("Total Komisi Rp (lolos)", fmt_id(df_out["Komisi Rp"].fillna(0).sum()))
 
 st.dataframe(df_out, use_container_width=True, height=420)
 
 # =========================================================
-# EXPORT (CSV / TXT) + Nama file custom
+# LOG DATA TIDAK LOLOS (ditampilkan + bisa export)
 # =========================================================
-st.subheader("Export Hasil")
+with st.expander("🧾 Log data tidak lolos filter (untuk dipakai lagi)"):
+    if df_rej_out is None or df_rej_out.empty:
+        st.info("Belum ada data log. Klik **🚀 JALANKAN FILTER** dulu.")
+    else:
+        st.caption(f"Jumlah data tidak lolos: {len(df_rej_out)}")
+        st.dataframe(df_rej_out, use_container_width=True, height=320)
+
+# =========================================================
+# EXPORT HASIL LOLOS (CSV / TXT) + Nama file custom
+# =========================================================
+st.subheader("Export Hasil (Lolos)")
 
 colA, colB = st.columns([2, 3])
-
 with colA:
-    export_fmt = st.radio("Format export", ["CSV", "TXT"], horizontal=True, index=0)
-
+    export_fmt = st.radio("Format export", ["CSV", "TXT"], horizontal=True, index=0, key="fmt_pass")
 with colB:
-    base_name = st.text_input("Nama file (tanpa ekstensi)", value="hasil_filter_produk")
+    base_name = st.text_input("Nama file (tanpa ekstensi)", value="hasil_filter_produk", key="name_pass")
 
 base_name = sanitize_basename(base_name)
 
@@ -347,7 +458,7 @@ else:
     bytes_out = export_txt_bytes(df_out)
     fname = f"{base_name}.txt"
     mime = "text/plain"
-    note = "TXT diexport sebagai TSV (TAB), TANPA header, TANPA kolom No."
+    note = "TXT (TSV TAB) tanpa header & tanpa kolom No (sesuai format kamu)."
 
 st.download_button(
     f"⬇️ Download ({export_fmt})",
@@ -355,5 +466,43 @@ st.download_button(
     file_name=fname,
     mime=mime,
 )
-
 st.caption(note)
+
+# =========================================================
+# EXPORT LOG TIDAK LOLOS
+# =========================================================
+st.subheader("Export Log (Tidak Lolos)")
+
+if df_rej_out is None or df_rej_out.empty:
+    st.info("Log belum tersedia. Klik **🚀 JALANKAN FILTER** dulu untuk membuat log data tidak lolos.")
+else:
+    colC, colD = st.columns([2, 3])
+    with colC:
+        log_fmt = st.radio("Format log", ["CSV", "TXT"], horizontal=True, index=0, key="fmt_log")
+    with colD:
+        log_name = st.text_input(
+            "Nama file log (tanpa ekstensi)",
+            value=f"{base_name}_log_tidak_lolos",
+            key="name_log"
+        )
+
+    log_name = sanitize_basename(log_name, fallback=f"{base_name}_log_tidak_lolos")
+
+    if log_fmt == "CSV":
+        log_bytes = export_reject_csv_bytes(df_rej_out)
+        log_fname = f"{log_name}.csv"
+        log_mime = "text/csv"
+        log_note = "CSV log berisi semua kolom + Alasan (dengan header)."
+    else:
+        log_bytes = export_reject_txt_bytes(df_rej_out)
+        log_fname = f"{log_name}.txt"
+        log_mime = "text/plain"
+        log_note = "TXT log = TSV TAB tanpa header, tanpa No, + kolom terakhir Alasan."
+
+    st.download_button(
+        f"⬇️ Download LOG ({log_fmt})",
+        data=log_bytes,
+        file_name=log_fname,
+        mime=log_mime,
+    )
+    st.caption(log_note)
