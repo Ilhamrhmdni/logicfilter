@@ -639,7 +639,7 @@ if st.session_state.stage == "filtered":
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Valid diproses", f"{fs.get('seen_valid_rows', 0):,}".replace(",", "."))
     m2.metric("Lolos", f"{fs.get('passed_rows', 0):,}".replace(",", "."))
-    m3.metric("Total Terjual Bulanan (lolos)", fmt_id(fs.get("sum_terjual_bulanan_passed", 0)))
+    m3.metric("Total Terjual Bulanan (lolos)", fmt_id(fs.get("sum_Harga_passed", 0)))
     m4.metric("Total Komisi Rp (lolos)", fmt_id(fs.get("sum_komisi_rp_passed", 0)))
 
     # ukuran output
