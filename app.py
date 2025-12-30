@@ -28,7 +28,7 @@ COLUMNS = [
 # Session State (kunci alur)
 # =========================================================
 if "stage" not in st.session_state:
-    # "input" -> belum proses, "ready" -> data sudah diproses, siap filter/export
+    # "input" -> belum proses, "ready" -> data sudah diproses
     st.session_state.stage = "input"
 
 if "raw_text" not in st.session_state:
@@ -47,7 +47,6 @@ def clean_number_id(x):
     """
     Bersihin angka model Indonesia:
     '43.800' -> 43800
-    '59,999' -> 59999
     'Rp 10.860' -> 10860
     '-' / '' -> NaN
     """
@@ -67,15 +66,10 @@ def clean_number_id(x):
 
 
 def detect_sep(text: str) -> str:
-    # TSV (tab) kalau ada tab, selain itu anggap CSV koma
     return "\t" if "\t" in text else ","
 
 
 def read_no_header_text(text: str) -> pd.DataFrame:
-    """
-    Baca data TANPA header dari teks (paste/upload).
-    Otomatis deteksi pemisah TAB atau koma.
-    """
     text = (text or "").strip()
     if not text:
         return pd.DataFrame(columns=COLUMNS)
@@ -85,7 +79,7 @@ def read_no_header_text(text: str) -> pd.DataFrame:
         StringIO(text),
         sep=sep,
         header=None,
-        names=COLUMNS,     # header ditanam di script
+        names=COLUMNS,  # header ditanam di script
         engine="python",
         dtype=str,
     )
@@ -95,11 +89,11 @@ def read_no_header_text(text: str) -> pd.DataFrame:
 def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # rapikan teks
+    # teks
     df["Link Produk"] = df["Link Produk"].astype(str).str.strip()
     df["Nama Produk"] = df["Nama Produk"].astype(str).str.strip()
 
-    # ubah kolom numerik
+    # numerik
     for c in ["No", "Harga", "Stock", "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp", "Ratting"]:
         df[c] = df[c].apply(clean_number_id)
 
@@ -107,12 +101,10 @@ def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def export_csv_bytes(df: pd.DataFrame) -> bytes:
-    # CSV koma, include header
     return df.to_csv(index=False, sep=",").encode("utf-8")
 
 
 def export_txt_bytes(df: pd.DataFrame) -> bytes:
-    # TXT sebagai TSV (tab), include header
     return df.to_csv(index=False, sep="\t").encode("utf-8")
 
 
@@ -126,7 +118,6 @@ def fmt_id(x):
 
 # =========================================================
 # Sidebar: Input + Tombol kontrol
-# (Tidak ada parsing/cleaning/preview sebelum MULAI PROSES)
 # =========================================================
 with st.sidebar:
     st.header("Input Data")
@@ -158,7 +149,7 @@ with st.sidebar:
     with c2:
         reset_btn = st.button("🔄 RESET", use_container_width=True)
 
-# RESET: balikin ke kondisi awal
+# RESET
 if reset_btn:
     st.session_state.stage = "input"
     st.session_state.raw_text = ""
@@ -167,7 +158,7 @@ if reset_btn:
     st.rerun()
 
 # =========================================================
-# STAGE: INPUT (LOCKED) — TIDAK ADA PROSES DI SINI
+# STAGE: INPUT (LOCKED) — TIDAK ADA PROSES
 # =========================================================
 if st.session_state.stage == "input":
     st.info("Masukkan data via sidebar lalu klik **▶️ MULAI PROSES**. Tidak ada parsing/cleaning/preview sebelum tombol itu ditekan.")
@@ -177,23 +168,22 @@ if st.session_state.stage == "input":
             st.error("Data masih kosong. Paste atau upload dulu.")
             st.stop()
 
-        # === Baru mulai parsing + cleaning setelah tombol ditekan ===
+        # parsing + cleaning hanya setelah tombol ditekan
         df0 = read_no_header_text(st.session_state.raw_text)
         if df0.empty:
-            st.error("Data terbaca kosong. Pastikan format TSV (tab) atau CSV (koma) tanpa header.")
+            st.error("Data terbaca kosong. Pastikan TSV (tab) atau CSV (koma) tanpa header.")
             st.stop()
 
         df0 = coerce_types(df0)
-
         st.session_state.df = df0
         st.session_state.df_filtered = df0.copy()
         st.session_state.stage = "ready"
         st.rerun()
 
-    st.stop()  # wajib stop agar tidak ada proses lanjut
+    st.stop()
 
 # =========================================================
-# STAGE: READY — data sudah diproses, baru boleh preview/filter/export
+# READY
 # =========================================================
 df = st.session_state.df
 if df is None or df.empty:
@@ -204,31 +194,28 @@ st.subheader("Preview Data (setelah dibersihkan)")
 st.dataframe(df, use_container_width=True, height=320)
 
 # =========================================================
-# Filter (manual trigger) — hanya 4 kolom
+# Filter MIN (manual trigger)
 # =========================================================
-st.subheader("Filter (Manual Trigger)")
+st.subheader("Filter MIN (Manual Trigger)")
 
 with st.sidebar:
-    st.header("Filter")
+    st.header("Filter MIN")
     with st.form("filter_form"):
-        stock_min = st.number_input("Stock minimal", min_value=0, value=0, step=1)
-        tb_min = st.number_input("Terjual Bulanan minimal", min_value=0, value=0, step=1)
+        min_stock = st.number_input("min Stock", min_value=0, value=0, step=1)
+        min_terjual_bulanan = st.number_input("min Terjual Bulanan", min_value=0, value=0, step=1)
 
-        kmax = float(df["Komisi %"].max()) if df["Komisi %"].notna().any() else 0.0
-        komisi_pct_rng = st.slider("Rentang Komisi %", 0.0, kmax, (0.0, kmax))
-
-        rmax = float(df["Komisi Rp"].max()) if df["Komisi Rp"].notna().any() else 0.0
-        komisi_rp_rng = st.slider("Rentang Komisi Rp", 0.0, rmax, (0.0, rmax))
+        # Komisi % dan Komisi Rp bisa desimal, tapi kita pakai float
+        min_komisi_pct = st.number_input("min Komisi %", min_value=0.0, value=0.0, step=0.5)
+        min_komisi_rp = st.number_input("min Komisi Rp", min_value=0.0, value=0.0, step=100.0)
 
         run_filter_btn = st.form_submit_button("🚀 JALANKAN FILTER")
 
-# Filter hanya jalan kalau tombol ditekan
 if run_filter_btn:
     f = df.copy()
-    f = f[f["Stock"].fillna(0) >= stock_min]
-    f = f[f["Terjual Bulanan"].fillna(0) >= tb_min]
-    f = f[(f["Komisi %"].fillna(0) >= komisi_pct_rng[0]) & (f["Komisi %"].fillna(0) <= komisi_pct_rng[1])]
-    f = f[(f["Komisi Rp"].fillna(0) >= komisi_rp_rng[0]) & (f["Komisi Rp"].fillna(0) <= komisi_rp_rng[1])]
+    f = f[f["Stock"].fillna(0) >= float(min_stock)]
+    f = f[f["Terjual Bulanan"].fillna(0) >= float(min_terjual_bulanan)]
+    f = f[f["Komisi %"].fillna(0) >= float(min_komisi_pct)]
+    f = f[f["Komisi Rp"].fillna(0) >= float(min_komisi_rp)]
     st.session_state.df_filtered = f
 
 df_out = st.session_state.df_filtered if st.session_state.df_filtered is not None else df
