@@ -101,11 +101,21 @@ def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
 def export_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False, sep=",").encode("utf-8")
 
-
-def export_txt_bytes(df: pd.DataFrame) -> bytes:
-    # TXT = TSV (tab) + header
-    return df.to_csv(index=False, sep="\t").encode("utf-8")
-
+ddef export_txt_bytes(df: pd.DataFrame) -> bytes:
+    # TXT = TSV (TAB), TANPA HEADER, TANPA KOLOM "No"
+    cols_txt = [
+        "Link Produk",
+        "Nama Produk",
+        "Harga",
+        "Stock",
+        "Terjual Bulanan",
+        "Terjual Semua",
+        "Komisi %",
+        "Komisi Rp",
+        "Ratting",
+    ]
+    df_txt = df[cols_txt].copy()
+    return df_txt.to_csv(index=False, header=False, sep="\t").encode("utf-8")
 
 def fmt_id(x):
     try:
