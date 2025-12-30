@@ -13,73 +13,10 @@ import streamlit as st
 st.set_page_config(page_title="Shopee Product Filter", layout="wide")
 
 # =========================
-# STYLE (Summary Card)
-# =========================
-st.markdown(
-    """
-<style>
-.summary-card{
-  border: 1px solid rgba(255,255,255,.08);
-  background: rgba(255,255,255,.03);
-  border-radius: 14px;
-  padding: 14px 14px 10px 14px;
-  margin: 6px 0 18px 0;
-}
-.summary-title{
-  font-size: 0.95rem;
-  font-weight: 600;
-  margin-bottom: 10px;
-  opacity: .95;
-}
-.summary-grid{
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 10px;
-}
-.summary-item{
-  border: 1px solid rgba(255,255,255,.06);
-  background: rgba(0,0,0,.10);
-  border-radius: 12px;
-  padding: 10px 12px;
-}
-.summary-k{
-  font-size: 0.75rem;
-  opacity: .75;
-  margin-bottom: 2px;
-}
-.summary-v{
-  font-size: 1.25rem;
-  font-weight: 700;
-  line-height: 1.15;
-  letter-spacing: .2px;
-}
-.summary-sub{
-  font-size: 0.70rem;
-  opacity: .55;
-  margin-top: 3px;
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-# =========================
 # HEADER TETAP
 # =========================
 COLUMNS_10 = [
     "No",
-    "Link Produk",
-    "Nama Produk",
-    "Harga",
-    "Stock",
-    "Terjual Bulanan",
-    "Terjual Semua",
-    "Komisi %",
-    "Komisi Rp",
-    "Ratting",
-]
-
-COLUMNS_9_NO_NO = [
     "Link Produk",
     "Nama Produk",
     "Harga",
@@ -182,36 +119,6 @@ def safe_filesize_mb(path: str) -> float:
         return os.path.getsize(path) / (1024 * 1024)
     except Exception:
         return 0.0
-
-
-def summary_card(title: str, items: list[dict]):
-    """
-    items: [{"k": "Label", "v": "Value", "sub": "optional"}, ...]
-    """
-    blocks = []
-    for it in items:
-        k = it.get("k", "")
-        v = it.get("v", "")
-        sub = it.get("sub", "")
-        sub_html = f'<div class="summary-sub">{sub}</div>' if sub else ""
-        blocks.append(
-            f"""
-            <div class="summary-item">
-              <div class="summary-k">{k}</div>
-              <div class="summary-v">{v}</div>
-              {sub_html}
-            </div>
-            """
-        )
-    html = f"""
-    <div class="summary-card">
-      <div class="summary-title">{title}</div>
-      <div class="summary-grid">
-        {''.join(blocks)}
-      </div>
-    </div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
 
 
 def write_reject_header(csv_path: str):
@@ -538,7 +445,6 @@ st.caption("Input tanpa header • Proses streaming • Export CSV/TXT + Log")
 # =========================
 with st.sidebar:
     st.header("Input Data")
-
     source_mode = st.radio("Sumber data", ["Paste (TSV/CSV)", "Upload (.txt / .csv)"], index=0)
 
     paste_too_big = False
@@ -592,6 +498,7 @@ if st.session_state.stage == "input":
     if start_btn:
         paths = st.session_state.paths
 
+        # tulis raw input
         if source_mode.startswith("Paste"):
             if not (st.session_state.raw_text or "").strip():
                 st.error("Data kosong.")
@@ -614,6 +521,7 @@ if st.session_state.stage == "input":
             sample = txt.splitlines()[0] if txt else ""
             sep = detect_sep_from_sample(sample)
 
+        # reset output files
         for p in [paths["cleaned_tsv"], paths["passed_csv"], paths["passed_txt"], paths["reject_csv"], paths["reject_txt"]]:
             try:
                 if os.path.exists(p):
@@ -639,100 +547,110 @@ if st.session_state.stage == "input":
     st.stop()
 
 # =========================
-# READY (RINCIAN — Summary Card)
+# MAIN: TABS
 # =========================
+tab_rincian, tab_export = st.tabs(["Rincian", "Export"])
+
 paths = st.session_state.paths
 prep = st.session_state.prep_stats or {}
-
-summary_card(
-    "Rincian Data",
-    [
-        {"k": "Total baris (raw)", "v": f"{prep.get('total_lines', 0):,}".replace(",", ".")},
-        {"k": "Baris valid", "v": f"{prep.get('valid_rows', 0):,}".replace(",", ".")},
-        {"k": "Skip (PARSE)", "v": f"{prep.get('bad_parse', 0):,}".replace(",", ".")},
-        {"k": "Skip (CLEAN)", "v": f"{prep.get('bad_clean', 0):,}".replace(",", ".")},
-        {"k": "Cleaned TSV (MB)", "v": f"{safe_filesize_mb(paths['cleaned_tsv']):.1f}"},
-        {"k": "Log CSV (MB)", "v": f"{safe_filesize_mb(paths['reject_csv']):.1f}"},
-        {"k": "Log TXT (MB)", "v": f"{safe_filesize_mb(paths['reject_txt']):.1f}"},
-    ],
-)
+fs = st.session_state.filter_stats or {}
 
 # =========================
-# FILTER TRIGGER
+# TAB: RINCIAN
 # =========================
-if run_filter_btn:
-    terms = parse_terms(include_words_raw)
-    with st.spinner("Filtering..."):
-        stats = run_streaming_filter(
-            cleaned_path=paths["cleaned_tsv"],
-            passed_csv=paths["passed_csv"],
-            passed_txt=paths["passed_txt"],
-            reject_csv=paths["reject_csv"],
-            reject_txt=paths["reject_txt"],
-            min_stock=min_stock,
-            min_tb=min_tb,
-            min_kpct=min_kpct,
-            min_krp=min_krp,
-            include_terms=terms,
-            chunk_size=200_000,
-        )
-    st.session_state.filter_stats = stats
-    st.session_state.stage = "filtered"
-    st.rerun()
+with tab_rincian:
+    st.subheader("Rincian Data")
+
+    cA, cB, cC, cD = st.columns(4)
+    cA.metric("Total baris (raw)", f"{prep.get('total_lines', 0):,}".replace(",", "."))
+    cB.metric("Baris valid", f"{prep.get('valid_rows', 0):,}".replace(",", "."))
+    cC.metric("Skip (PARSE)", f"{prep.get('bad_parse', 0):,}".replace(",", "."))
+    cD.metric("Skip (CLEAN)", f"{prep.get('bad_clean', 0):,}".replace(",", "."))
+
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Cleaned file (TSV) MB", f"{safe_filesize_mb(paths['cleaned_tsv']):.1f}")
+    s2.metric("Log (CSV) MB", f"{safe_filesize_mb(paths['reject_csv']):.1f}")
+    s3.metric("Log (TXT) MB", f"{safe_filesize_mb(paths['reject_txt']):.1f}")
+
+    if run_filter_btn:
+        terms = parse_terms(include_words_raw)
+        with st.spinner("Filtering..."):
+            stats = run_streaming_filter(
+                cleaned_path=paths["cleaned_tsv"],
+                passed_csv=paths["passed_csv"],
+                passed_txt=paths["passed_txt"],
+                reject_csv=paths["reject_csv"],
+                reject_txt=paths["reject_txt"],
+                min_stock=min_stock,
+                min_tb=min_tb,
+                min_kpct=min_kpct,
+                min_krp=min_krp,
+                include_terms=terms,
+                chunk_size=200_000,
+            )
+        st.session_state.filter_stats = stats
+        st.session_state.stage = "filtered"
+        st.rerun()
+
+    if st.session_state.stage == "filtered":
+        st.divider()
+        st.subheader("Rincian Hasil Filter")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Valid diproses", f"{fs.get('seen_valid_rows', 0):,}".replace(",", "."))
+        m2.metric("Lolos", f"{fs.get('passed_rows', 0):,}".replace(",", "."))
+        m3.metric("Total Terjual Bulanan (lolos)", fmt_id(fs.get("sum_terjual_bulanan_passed", 0)))
+        m4.metric("Total Komisi Rp (lolos)", fmt_id(fs.get("sum_komisi_rp_passed", 0)))
+
+        o1, o2, o3, o4 = st.columns(4)
+        o1.metric("Hasil (CSV) MB", f"{safe_filesize_mb(paths['passed_csv']):.1f}")
+        o2.metric("Hasil (TXT) MB", f"{safe_filesize_mb(paths['passed_txt']):.1f}")
+        o3.metric("Log (CSV) MB", f"{safe_filesize_mb(paths['reject_csv']):.1f}")
+        o4.metric("Log (TXT) MB", f"{safe_filesize_mb(paths['reject_txt']):.1f}")
 
 # =========================
-# FILTERED (RINCIAN — Summary Card)
+# TAB: EXPORT
 # =========================
-if st.session_state.stage == "filtered":
-    fs = st.session_state.filter_stats or {}
-
-    summary_card(
-        "Rincian Hasil Filter",
-        [
-            {"k": "Valid diproses", "v": f"{fs.get('seen_valid_rows', 0):,}".replace(",", ".")},
-            {"k": "Lolos", "v": f"{fs.get('passed_rows', 0):,}".replace(",", ".")},
-            {"k": "Total Terjual Bulanan", "v": fmt_id(fs.get("sum_terjual_bulanan_passed", 0))},
-            {"k": "Total Komisi Rp", "v": fmt_id(fs.get("sum_komisi_rp_passed", 0))},
-            {"k": "Hasil CSV (MB)", "v": f"{safe_filesize_mb(paths['passed_csv']):.1f}"},
-            {"k": "Hasil TXT (MB)", "v": f"{safe_filesize_mb(paths['passed_txt']):.1f}"},
-            {"k": "Log CSV (MB)", "v": f"{safe_filesize_mb(paths['reject_csv']):.1f}"},
-            {"k": "Log TXT (MB)", "v": f"{safe_filesize_mb(paths['reject_txt']):.1f}"},
-        ],
-    )
-
+with tab_export:
     st.subheader("Export")
-    base_name = sanitize_basename(st.text_input("Nama file hasil", value="hasil_filter_produk"), "hasil_filter_produk")
-    log_name = sanitize_basename(st.text_input("Nama file log", value=f"{base_name}_log_tidak_lolos"),
-                                 f"{base_name}_log_tidak_lolos")
 
-    col1, col2 = st.columns(2)
+    if st.session_state.stage != "filtered":
+        st.info("Jalankan filter terlebih dulu untuk mengaktifkan export.")
+    else:
+        base_name = sanitize_basename(st.text_input("Nama file hasil", value="hasil_filter_produk"), "hasil_filter_produk")
+        log_name = sanitize_basename(
+            st.text_input("Nama file log", value=f"{base_name}_log_tidak_lolos"),
+            f"{base_name}_log_tidak_lolos"
+        )
 
-    with col1:
-        fmt = st.radio("Format hasil", ["CSV", "TXT"], horizontal=True, index=0, key="fmt_pass")
-        out_path = paths["passed_csv"] if fmt == "CSV" else paths["passed_txt"]
-        out_file = f"{base_name}.csv" if fmt == "CSV" else f"{base_name}.txt"
-        mime = "text/csv" if fmt == "CSV" else "text/plain"
+        col1, col2 = st.columns(2)
 
-        if os.path.exists(out_path):
-            size_mb = safe_filesize_mb(out_path)
-            if size_mb > 80:
-                st.warning("File besar. Download via browser bisa berat.")
-            with open(out_path, "rb") as f:
-                st.download_button("Download hasil", data=f.read(), file_name=out_file, mime=mime)
-        else:
-            st.info("Belum ada hasil. Jalankan filter dulu.")
+        with col1:
+            fmt = st.radio("Format hasil", ["CSV", "TXT"], horizontal=True, index=0, key="fmt_pass")
+            out_path = paths["passed_csv"] if fmt == "CSV" else paths["passed_txt"]
+            out_file = f"{base_name}.csv" if fmt == "CSV" else f"{base_name}.txt"
+            mime = "text/csv" if fmt == "CSV" else "text/plain"
 
-    with col2:
-        fmt2 = st.radio("Format log", ["CSV", "TXT"], horizontal=True, index=0, key="fmt_log")
-        log_path = paths["reject_csv"] if fmt2 == "CSV" else paths["reject_txt"]
-        log_file = f"{log_name}.csv" if fmt2 == "CSV" else f"{log_name}.txt"
-        log_mime = "text/csv" if fmt2 == "CSV" else "text/plain"
+            if os.path.exists(out_path):
+                size_mb = safe_filesize_mb(out_path)
+                if size_mb > 80:
+                    st.warning("File besar. Download via browser bisa berat.")
+                with open(out_path, "rb") as f:
+                    st.download_button("Download hasil", data=f.read(), file_name=out_file, mime=mime)
+            else:
+                st.info("File hasil belum tersedia.")
 
-        if os.path.exists(log_path):
-            size_mb = safe_filesize_mb(log_path)
-            if size_mb > 80:
-                st.warning("File besar. Download via browser bisa berat.")
-            with open(log_path, "rb") as f:
-                st.download_button("Download log", data=f.read(), file_name=log_file, mime=log_mime)
-        else:
-            st.info("Belum ada log.")
+        with col2:
+            fmt2 = st.radio("Format log", ["CSV", "TXT"], horizontal=True, index=0, key="fmt_log")
+            log_path = paths["reject_csv"] if fmt2 == "CSV" else paths["reject_txt"]
+            log_file = f"{log_name}.csv" if fmt2 == "CSV" else f"{log_name}.txt"
+            log_mime = "text/csv" if fmt2 == "CSV" else "text/plain"
+
+            if os.path.exists(log_path):
+                size_mb = safe_filesize_mb(log_path)
+                if size_mb > 80:
+                    st.warning("File besar. Download via browser bisa berat.")
+                with open(log_path, "rb") as f:
+                    st.download_button("Download log", data=f.read(), file_name=log_file, mime=log_mime)
+            else:
+                st.info("File log belum tersedia.")
