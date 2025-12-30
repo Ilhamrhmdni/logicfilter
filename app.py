@@ -421,7 +421,7 @@ df_rej_out = st.session_state.df_rejected
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Total baris (awal)", len(df))
 m2.metric("Total baris (lolos)", len(df_out))
-m3.metric("Total Terjual Bulanan (lolos)", fmt_id(df_out["Terjual Bulanan"].fillna(0).sum()))
+m3.metric("Total Terjual Bulanan (lolos)", fmt_id(df_out["Harga"].fillna(0).sum()))
 m4.metric("Total Komisi Rp (lolos)", fmt_id(df_out["Komisi Rp"].fillna(0).sum()))
 
 st.dataframe(df_out, use_container_width=True, height=420)
