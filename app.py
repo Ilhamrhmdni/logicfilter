@@ -5,7 +5,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-st.set_page_config(page_title="Filter Produk (Locked)", layout="wide")
+st.set_page_config(page_title="Filter Produk (Locked Pipeline)", layout="wide")
 st.title("📦 Filter & Olah Data Produk (Shopee)")
 
 # =========================================================
@@ -39,6 +39,7 @@ if "df" not in st.session_state:
 if "df_filtered" not in st.session_state:
     st.session_state.df_filtered = None
 
+
 # =========================================================
 # HELPERS
 # =========================================================
@@ -59,7 +60,7 @@ def clean_number_id(x):
     s = s.replace(" ", "")
     s = re.sub(r"[^0-9\.,]", "", s)
 
-    # umumnya titik/koma sebagai pemisah ribuan
+    # umumnya titik/koma pemisah ribuan
     s = s.replace(".", "").replace(",", "")
     return pd.to_numeric(s, errors="coerce")
 
@@ -78,7 +79,7 @@ def read_no_header_text(text: str) -> pd.DataFrame:
         StringIO(text),
         sep=sep,
         header=None,
-        names=COLUMNS,   # header ditanam
+        names=COLUMNS,  # header ditanam di script
         engine="python",
         dtype=str,
     )
@@ -88,11 +89,9 @@ def read_no_header_text(text: str) -> pd.DataFrame:
 def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # teks
     df["Link Produk"] = df["Link Produk"].astype(str).str.strip()
     df["Nama Produk"] = df["Nama Produk"].astype(str).str.strip()
 
-    # numerik
     for c in ["No", "Harga", "Stock", "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp", "Ratting"]:
         df[c] = df[c].apply(clean_number_id)
 
@@ -116,9 +115,10 @@ def fmt_id(x):
     except Exception:
         return str(x)
 
+
 # =========================================================
-# SIDEBAR INPUT + TOMBOL KONTROL
-# (Tidak ada parsing/cleaning/preview sebelum MULAI PROSES)
+# SIDEBAR INPUT + CONTROL
+# Tidak ada parsing/cleaning/preview sebelum ▶️ MULAI PROSES
 # =========================================================
 with st.sidebar:
     st.header("Input Data")
@@ -159,7 +159,7 @@ if reset_btn:
     st.rerun()
 
 # =========================================================
-# STAGE INPUT (LOCKED) — TIDAK ADA PROSES
+# STAGE INPUT (LOCKED)
 # =========================================================
 if st.session_state.stage == "input":
     st.info("Masukkan data via sidebar lalu klik **▶️ MULAI PROSES**. Tidak ada parsing/cleaning/preview sebelum tombol itu ditekan.")
@@ -169,7 +169,6 @@ if st.session_state.stage == "input":
             st.error("Data masih kosong. Paste atau upload dulu.")
             st.stop()
 
-        # parsing + cleaning hanya setelah tombol ditekan
         df0 = read_no_header_text(st.session_state.raw_text)
         if df0.empty:
             st.error("Data terbaca kosong. Pastikan TSV (tab) atau CSV (koma) tanpa header.")
@@ -184,7 +183,7 @@ if st.session_state.stage == "input":
     st.stop()
 
 # =========================================================
-# READY — Preview baru boleh muncul
+# READY
 # =========================================================
 df = st.session_state.df
 if df is None or df.empty:
@@ -195,38 +194,37 @@ st.subheader("Preview Data (setelah dibersihkan)")
 st.dataframe(df, use_container_width=True, height=320)
 
 # =========================================================
-# FILTER MIN (SEMUA INPUT ANGKA) + MANUAL TRIGGER
+# FILTER MIN (INPUT ANGKA SAJA) + MANUAL TRIGGER
 # =========================================================
-st.subheader("Filter MIN (Input Angka + Manual Trigger)")
+st.subheader("Hasil Filter")
 
 with st.sidebar:
-    st.header("Filter (MIN)")
+    st.header("Filter (MIN - input angka)")
     with st.form("filter_form"):
-        min_stock = st.number_input("min Stock", min_value=0, value=0, step=1)
-        min_tb = st.number_input("min Terjual Bulanan", min_value=0, value=0, step=1)
+        min_stock = st.number_input("Stock minimal", min_value=0, value=0, step=1)
 
-        # input angka saja (tanpa slider)
-        min_komisi_pct = st.number_input("min Komisi %", min_value=0.0, value=0.0, step=0.5)
-        min_komisi_rp = st.number_input("min Komisi Rp", min_value=0.0, value=0.0, step=100.0)
+        min_tb = st.number_input("Terjual Bulanan minimal", min_value=0, value=0, step=1)
+
+        # angka saja (tanpa slider)
+        min_kpct = st.number_input("Komisi % minimal", min_value=0.0, value=0.0, step=1.0)
+
+        min_krp = st.number_input("Komisi Rp minimal", min_value=0.0, value=0.0, step=100.0)
 
         run_filter_btn = st.form_submit_button("🚀 JALANKAN FILTER")
 
-# apply filter hanya kalau tombol ditekan
 if run_filter_btn:
     f = df.copy()
     f = f[f["Stock"].fillna(0) >= float(min_stock)]
     f = f[f["Terjual Bulanan"].fillna(0) >= float(min_tb)]
-    f = f[f["Komisi %"].fillna(0) >= float(min_komisi_pct)]
-    f = f[f["Komisi Rp"].fillna(0) >= float(min_komisi_rp)]
+    f = f[f["Komisi %"].fillna(0) >= float(min_kpct)]
+    f = f[f["Komisi Rp"].fillna(0) >= float(min_krp)]
     st.session_state.df_filtered = f
 
 df_out = st.session_state.df_filtered if st.session_state.df_filtered is not None else df
 
 # =========================================================
-# OUTPUT + METRICS
+# METRICS + TABLE
 # =========================================================
-st.subheader("Hasil Filter")
-
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Total baris (awal)", len(df))
 m2.metric("Total baris (hasil)", len(df_out))
@@ -258,4 +256,4 @@ st.download_button(
     mime=mime,
 )
 
-st.caption("TXT diexport sebagai TSV (dipisah TAB) + header, supaya mudah dipakai ulang.")
+st.caption("TXT diexport sebagai TSV (dipisah TAB) + header.")
