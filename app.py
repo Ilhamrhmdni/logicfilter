@@ -5,7 +5,6 @@ import csv
 import uuid
 import shutil
 import tempfile
-from io import StringIO
 
 import numpy as np
 import pandas as pd
@@ -82,12 +81,6 @@ if "prep_stats" not in st.session_state:
 if "filter_stats" not in st.session_state:
     st.session_state.filter_stats = {}
 
-if "preview_df" not in st.session_state:
-    st.session_state.preview_df = None
-
-if "passed_preview_df" not in st.session_state:
-    st.session_state.passed_preview_df = None
-
 
 # =========================
 # HELPERS
@@ -102,7 +95,6 @@ def clean_number_id(x):
     s = str(x).strip()
     if s == "" or s.lower() in ["nan", "none", "-", "null"]:
         return np.nan
-
     s = s.replace("Rp", "").replace("rp", "").strip()
     s = s.replace(" ", "")
     s = re.sub(r"[^0-9\.,]", "", s)
@@ -134,15 +126,21 @@ def fmt_id(x):
         return str(x)
 
 
+def safe_filesize_mb(path: str) -> float:
+    try:
+        return os.path.getsize(path) / (1024 * 1024)
+    except Exception:
+        return 0.0
+
+
 def write_reject_header(csv_path: str):
     need_header = (not os.path.exists(csv_path)) or (os.path.getsize(csv_path) == 0)
     if need_header:
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(REJ_LOG_COLS_CSV)
+            csv.writer(f).writerow(REJ_LOG_COLS_CSV)
 
 
-def append_reject_csv(csv_path: str, rows: list):
+def append_reject_csv(csv_path: str, rows: list[dict]):
     if not rows:
         return
     write_reject_header(csv_path)
@@ -152,7 +150,7 @@ def append_reject_csv(csv_path: str, rows: list):
             w.writerow([r.get(c, "") for c in REJ_LOG_COLS_CSV])
 
 
-def append_reject_txt(txt_path: str, rows: list):
+def append_reject_txt(txt_path: str, rows: list[dict]):
     if not rows:
         return
     with open(txt_path, "a", newline="", encoding="utf-8") as f:
@@ -170,6 +168,7 @@ def init_cleaned_file(cleaned_path: str):
 def append_cleaned_rows(cleaned_path: str, df_valid: pd.DataFrame):
     if df_valid is None or df_valid.empty:
         return
+    # tulis TSV internal (header sudah ada di awal)
     with open(cleaned_path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter="\t")
         for _, r in df_valid.iterrows():
@@ -183,8 +182,20 @@ def append_cleaned_rows(cleaned_path: str, df_valid: pd.DataFrame):
             w.writerow(out)
 
 
-def process_streaming_prepare(raw_path: str, cleaned_path: str, reject_csv: str, reject_txt: str,
-                             sep: str, chunk_size: int = 100_000, preview_rows: int = 200):
+def process_streaming_prepare(
+    raw_path: str,
+    cleaned_path: str,
+    reject_csv: str,
+    reject_txt: str,
+    sep: str,
+    chunk_size: int = 100_000,
+):
+    """
+    ▶️ MULAI PROSES (streaming):
+    - skip baris rusak (kolom != 9/10) -> log PARSE
+    - clean angka; kalau kolom angka invalid -> skip -> log CLEAN + Kolom Error
+    - tulis baris valid ke cleaned.tsv (internal)
+    """
     init_cleaned_file(cleaned_path)
 
     total_lines = 0
@@ -192,14 +203,12 @@ def process_streaming_prepare(raw_path: str, cleaned_path: str, reject_csv: str,
     bad_parse = 0
     bad_clean = 0
 
-    preview_records = []
     auto_no = 1
     buffer_rows = []
     buffer_meta = []
 
     def flush_buffer():
-        nonlocal good_rows_total, bad_clean, preview_records, buffer_rows, buffer_meta
-
+        nonlocal good_rows_total, bad_clean, buffer_rows, buffer_meta
         if not buffer_rows:
             return
 
@@ -209,7 +218,7 @@ def process_streaming_prepare(raw_path: str, cleaned_path: str, reject_csv: str,
         df["Link Produk"] = df["Link Produk"].astype(str).str.strip()
         df["Nama Produk"] = df["Nama Produk"].astype(str).str.strip()
 
-        bad_cols_map = {}
+        bad_cols_map: dict[int, list[str]] = {}
 
         for col in NUM_COLS:
             orig = df[col].fillna("").astype(str).str.strip()
@@ -218,8 +227,7 @@ def process_streaming_prepare(raw_path: str, cleaned_path: str, reject_csv: str,
 
             invalid_mask = (~empty_mask) & cleaned.isna()
             if invalid_mask.any():
-                bad_idx = df.index[invalid_mask].tolist()
-                for i in bad_idx:
+                for i in df.index[invalid_mask].tolist():
                     bad_cols_map.setdefault(i, []).append(col)
 
             df[col] = cleaned
@@ -252,11 +260,6 @@ def process_streaming_prepare(raw_path: str, cleaned_path: str, reject_csv: str,
             df[col] = df[col].round(0).astype("Int64")
 
         append_cleaned_rows(cleaned_path, df)
-
-        if len(preview_records) < preview_rows:
-            needed = preview_rows - len(preview_records)
-            preview_records.extend(df.head(needed).to_dict(orient="records"))
-
         good_rows_total += len(df)
 
         buffer_rows.clear()
@@ -309,23 +312,40 @@ def process_streaming_prepare(raw_path: str, cleaned_path: str, reject_csv: str,
 
     flush_buffer()
 
-    preview_df = pd.DataFrame(preview_records, columns=COLUMNS_10) if preview_records else pd.DataFrame(columns=COLUMNS_10)
     stats = {
         "total_lines": total_lines,
         "valid_rows": good_rows_total,
         "bad_parse": bad_parse,
         "bad_clean": bad_clean,
     }
-    return stats, preview_df
+    return stats
 
 
-def run_streaming_filter(cleaned_path: str, passed_csv: str, passed_txt: str,
-                         reject_csv: str, reject_txt: str,
-                         min_stock: float, min_tb: float, min_kpct: float, min_krp: float,
-                         include_terms: list, chunk_size: int = 200_000, preview_rows: int = 200):
+def run_streaming_filter(
+    cleaned_path: str,
+    passed_csv: str,
+    passed_txt: str,
+    reject_csv: str,
+    reject_txt: str,
+    min_stock: float,
+    min_tb: float,
+    min_kpct: float,
+    min_krp: float,
+    include_terms: list[str],
+    chunk_size: int = 200_000,
+):
+    """
+    🚀 JALANKAN FILTER (streaming):
+    - baca cleaned.tsv per chunk
+    - apply filter numeric + nama wajib mengandung (OR)
+    - tulis passed.csv (header) & passed.txt (tanpa header & tanpa No)
+    - append rejected ke log (FILTER) + Kolom Error + Alasan
+    - hitung totals dari PASSED (Terjual Bulanan & Komisi Rp)
+    """
+    # init outputs
     with open(passed_csv, "w", newline="", encoding="utf-8") as f:
         csv.writer(f).writerow(COLUMNS_10)
-    with open(passed_txt, "w", newline="", encoding="utf-8") as f:
+    with open(passed_txt, "w", newline="", encoding="utf-8"):
         pass
 
     pattern = None
@@ -338,17 +358,22 @@ def run_streaming_filter(cleaned_path: str, passed_csv: str, passed_txt: str,
     sum_tb = 0
     sum_krp = 0
 
-    passed_preview = []
-
     prog = st.progress(0)
     status = st.empty()
     approx_total = st.session_state.prep_stats.get("valid_rows", 0) or 0
 
+    def to_int0(series):
+        return pd.to_numeric(series, errors="coerce").fillna(0).astype(np.int64)
+
+    def add_field(current: pd.Series, cond: pd.Series, label: str, sep: str):
+        cur = current.to_numpy()
+        c = cond.to_numpy()
+        add = np.where(c, label, "")
+        out = np.where(cur == "", add, np.where(add == "", cur, cur + sep + add))
+        return pd.Series(out, index=current.index, dtype=object)
+
     for chunk in pd.read_csv(cleaned_path, sep="\t", chunksize=chunk_size, dtype=str):
         total_seen += len(chunk)
-
-        def to_int0(s):
-            return pd.to_numeric(s, errors="coerce").fillna(0).astype(np.int64)
 
         stock = to_int0(chunk["Stock"])
         tb = to_int0(chunk["Terjual Bulanan"])
@@ -357,6 +382,7 @@ def run_streaming_filter(cleaned_path: str, passed_csv: str, passed_txt: str,
 
         mask = (stock >= int(min_stock)) & (tb >= int(min_tb)) & (kpct >= int(min_kpct)) & (krp >= int(min_krp))
 
+        name_ok = None
         if pattern:
             name_ok = chunk["Nama Produk"].fillna("").astype(str).str.contains(pattern, case=False, regex=True, na=False)
             mask = mask & name_ok
@@ -364,73 +390,71 @@ def run_streaming_filter(cleaned_path: str, passed_csv: str, passed_txt: str,
         passed = chunk[mask].copy()
         rejected = chunk[~mask].copy()
 
+        # write passed + totals
         if not passed.empty:
             sum_tb += int(pd.to_numeric(passed["Terjual Bulanan"], errors="coerce").fillna(0).sum())
             sum_krp += int(pd.to_numeric(passed["Komisi Rp"], errors="coerce").fillna(0).sum())
             total_passed += len(passed)
 
-            if len(passed_preview) < preview_rows:
-                need = preview_rows - len(passed_preview)
-                passed_preview.extend(passed.head(need).to_dict(orient="records"))
+            passed.to_csv(passed_csv, mode="a", header=False, index=False, columns=COLUMNS_10)
 
-            with open(passed_csv, "a", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                for _, r in passed.iterrows():
-                    w.writerow([r.get(c, "") for c in COLUMNS_10])
+            # TXT (tanpa header, tanpa No)
+            cols_txt = [
+                "Link Produk", "Nama Produk", "Harga", "Stock", "Terjual Bulanan",
+                "Terjual Semua", "Komisi %", "Komisi Rp", "Ratting",
+            ]
+            passed[cols_txt].to_csv(passed_txt, mode="a", header=False, index=False, sep="\t")
 
-            with open(passed_txt, "a", newline="", encoding="utf-8") as f:
-                w = csv.writer(f, delimiter="\t")
-                for _, r in passed.iterrows():
-                    w.writerow([
-                        r.get("Link Produk", ""),
-                        r.get("Nama Produk", ""),
-                        r.get("Harga", ""),
-                        r.get("Stock", ""),
-                        r.get("Terjual Bulanan", ""),
-                        r.get("Terjual Semua", ""),
-                        r.get("Komisi %", ""),
-                        r.get("Komisi Rp", ""),
-                        r.get("Ratting", ""),
-                    ])
-
+        # rejected -> log FILTER + Kolom Error + Alasan (vectorized)
         if not rejected.empty:
             total_rejected_filter += len(rejected)
 
-            rej_rows = []
-            for _, r in rejected.iterrows():
-                # kolom gagal dibuat ringkas (tanpa teks panjang)
-                fails = []
-                if int(r.get("Stock") or 0) < int(min_stock): fails.append("Stock")
-                if int(r.get("Terjual Bulanan") or 0) < int(min_tb): fails.append("Terjual Bulanan")
-                if int(r.get("Komisi %") or 0) < int(min_kpct): fails.append("Komisi %")
-                if int(r.get("Komisi Rp") or 0) < int(min_krp): fails.append("Komisi Rp")
-                if pattern and not re.search(pattern, str(r.get("Nama Produk") or ""), flags=re.IGNORECASE): fails.append("Nama Produk")
+            idx = rejected.index
+            stock_f = stock.loc[idx] < int(min_stock)
+            tb_f = tb.loc[idx] < int(min_tb)
+            kpct_f = kpct.loc[idx] < int(min_kpct)
+            krp_f = krp.loc[idx] < int(min_krp)
 
-                alasan = []
-                if "Stock" in fails: alasan.append(f"Stock < {int(min_stock)}")
-                if "Terjual Bulanan" in fails: alasan.append(f"Terjual Bulanan < {int(min_tb)}")
-                if "Komisi %" in fails: alasan.append(f"Komisi % < {int(min_kpct)}")
-                if "Komisi Rp" in fails: alasan.append(f"Komisi Rp < {int(min_krp)}")
-                if "Nama Produk" in fails and include_terms:
-                    alasan.append(f"Nama tidak mengandung: {', '.join(include_terms)}")
+            if pattern:
+                name_f = ~name_ok.loc[idx]
+            else:
+                name_f = pd.Series(False, index=idx)
 
-                row_dict = {c: r.get(c, "") for c in COLUMNS_10}
-                row_dict.update({
-                    "Sumber": "FILTER",
-                    "Baris Ke": "",
-                    "Kolom Error": ", ".join(fails),
-                    "Alasan": " | ".join(alasan) if alasan else "Tidak lolos filter",
-                })
-                rej_rows.append(row_dict)
+            kol = pd.Series("", index=idx, dtype=object)
+            kol = add_field(kol, stock_f, "Stock", ", ")
+            kol = add_field(kol, tb_f, "Terjual Bulanan", ", ")
+            kol = add_field(kol, kpct_f, "Komisi %", ", ")
+            kol = add_field(kol, krp_f, "Komisi Rp", ", ")
+            if pattern:
+                kol = add_field(kol, name_f, "Nama Produk", ", ")
 
-            append_reject_csv(reject_csv, rej_rows)
-            append_reject_txt(reject_txt, rej_rows)
+            alasan = pd.Series("", index=idx, dtype=object)
+            alasan = add_field(alasan, stock_f, f"Stock < {int(min_stock)}", " | ")
+            alasan = add_field(alasan, tb_f, f"Terjual Bulanan < {int(min_tb)}", " | ")
+            alasan = add_field(alasan, kpct_f, f"Komisi % < {int(min_kpct)}", " | ")
+            alasan = add_field(alasan, krp_f, f"Komisi Rp < {int(min_krp)}", " | ")
+            if pattern and include_terms:
+                alasan = add_field(alasan, name_f, f"Nama tidak mengandung: {', '.join(include_terms)}", " | ")
 
+            rej_df = rejected[COLUMNS_10].copy()
+            rej_df["Sumber"] = "FILTER"
+            rej_df["Baris Ke"] = ""
+            rej_df["Kolom Error"] = kol
+            rej_df["Alasan"] = np.where(alasan.to_numpy() == "", "Tidak lolos filter", alasan.to_numpy())
+
+            # CSV log
+            write_reject_header(reject_csv)
+            rej_df.to_csv(reject_csv, mode="a", header=False, index=False, columns=REJ_LOG_COLS_CSV)
+
+            # TXT log (TSV tanpa header)
+            rej_txt_df = rej_df.reindex(columns=REJ_LOG_COLS_TXT)
+            rej_txt_df.to_csv(reject_txt, mode="a", header=False, index=False, sep="\t")
+
+        # progress
         if approx_total > 0:
             prog.progress(min(1.0, total_seen / approx_total))
-            status.write(f"Processing... {total_seen:,} / {approx_total:,}".replace(",", "."))
-        else:
-            status.write(f"Processing... {total_seen:,}".replace(",", "."))
+        # status text dibuat minimal
+        status.write("Processing...")
 
     prog.progress(1.0)
     status.empty()
@@ -442,48 +466,34 @@ def run_streaming_filter(cleaned_path: str, passed_csv: str, passed_txt: str,
         "sum_terjual_bulanan_passed": sum_tb,
         "sum_komisi_rp_passed": sum_krp,
     }
-    passed_preview_df = pd.DataFrame(passed_preview, columns=COLUMNS_10) if passed_preview else pd.DataFrame(columns=COLUMNS_10)
-    return stats, passed_preview_df
+    return stats
 
 
 # =========================
-# HEADER (PROFESIONAL)
+# UI HEADER (PROFESIONAL)
 # =========================
 st.markdown("## Shopee Product Filter")
 st.caption("Input tanpa header • Proses streaming • Export CSV/TXT + Log")
 
 # =========================
-# SIDEBAR INPUT
+# SIDEBAR INPUT + FILTER
 # =========================
 with st.sidebar:
     st.header("Input Data")
 
-    source_mode = st.radio(
-        "Sumber data",
-        ["Paste (TSV/CSV)", "Upload (.txt / .csv)"],
-        index=0
-    )
+    source_mode = st.radio("Sumber data", ["Paste (TSV/CSV)", "Upload (.txt / .csv)"], index=0)
 
     paste_too_big = False
     uploaded = None
-
-    HARD_LIMIT_MB = 5.0  # biar paste gak bikin lemot/timeout
+    HARD_LIMIT_MB = 5.0
 
     if source_mode.startswith("Paste"):
-        st.session_state.raw_text = st.text_area(
-            "Paste data (tanpa header)",
-            height=220,
-            placeholder="Tempel TSV dari Excel atau CSV tanpa header.",
-        )
-
+        st.session_state.raw_text = st.text_area("Paste data (tanpa header)", height=220)
         raw = st.session_state.raw_text or ""
         size_mb = len(raw.encode("utf-8")) / (1024 * 1024)
-
-        # (hapus teks panjang/ukuran) -> tetap enforce limit
         if size_mb >= HARD_LIMIT_MB:
             paste_too_big = True
             st.error("Paste terlalu besar. Gunakan upload file.")
-
     else:
         uploaded = st.file_uploader("Upload file (tanpa header)", type=["txt", "csv"])
 
@@ -495,7 +505,7 @@ with st.sidebar:
         reset_btn = st.button("🔄 RESET", use_container_width=True)
 
     st.divider()
-    st.subheader("Filter")
+    st.header("Filter")
     with st.form("filter_form"):
         min_stock = st.number_input("Stock minimal", min_value=0, value=0, step=1)
         min_tb = st.number_input("Terjual Bulanan minimal", min_value=0, value=0, step=1)
@@ -504,24 +514,27 @@ with st.sidebar:
         include_words_raw = st.text_input("Nama Produk wajib mengandung", value="", placeholder="contoh: anak, bayi, kids")
         run_filter_btn = st.form_submit_button("🚀 JALANKAN FILTER")
 
+# =========================
 # RESET
+# =========================
 if reset_btn:
     try:
         shutil.rmtree(st.session_state.workdir, ignore_errors=True)
     except Exception:
         pass
-    for k in ["stage", "raw_text", "paths", "prep_stats", "filter_stats", "preview_df", "passed_preview_df", "workdir", "session_id"]:
+    for k in ["stage", "raw_text", "paths", "prep_stats", "filter_stats", "workdir", "session_id"]:
         if k in st.session_state:
             del st.session_state[k]
     st.rerun()
 
 # =========================
-# STAGE INPUT
+# STAGE: INPUT
 # =========================
 if st.session_state.stage == "input":
     if start_btn:
         paths = st.session_state.paths
 
+        # tulis raw input
         if source_mode.startswith("Paste"):
             if not (st.session_state.raw_text or "").strip():
                 st.error("Data kosong.")
@@ -544,7 +557,7 @@ if st.session_state.stage == "input":
             sample = txt.splitlines()[0] if txt else ""
             sep = detect_sep_from_sample(sample)
 
-        # bersihkan file output lama
+        # reset output files
         for p in [paths["cleaned_tsv"], paths["passed_csv"], paths["passed_txt"], paths["reject_csv"], paths["reject_txt"]]:
             try:
                 if os.path.exists(p):
@@ -553,41 +566,41 @@ if st.session_state.stage == "input":
                 pass
 
         with st.spinner("Processing..."):
-            stats, preview_df = process_streaming_prepare(
+            stats = process_streaming_prepare(
                 raw_path=paths["raw_input"],
                 cleaned_path=paths["cleaned_tsv"],
                 reject_csv=paths["reject_csv"],
                 reject_txt=paths["reject_txt"],
                 sep=sep,
                 chunk_size=100_000,
-                preview_rows=200,
             )
 
         st.session_state.prep_stats = stats
-        st.session_state.preview_df = preview_df
         st.session_state.filter_stats = {}
-        st.session_state.passed_preview_df = None
         st.session_state.stage = "ready"
         st.rerun()
 
     st.stop()
 
 # =========================
-# READY VIEW
+# STAGE: READY (RINCIAN SAJA — TANPA PREVIEW)
 # =========================
 paths = st.session_state.paths
 prep = st.session_state.prep_stats or {}
-preview_df = st.session_state.preview_df
 
-# Ringkasan bersih (tanpa heading panjang)
+st.subheader("Rincian Data")
+
 cA, cB, cC, cD = st.columns(4)
 cA.metric("Total baris (raw)", f"{prep.get('total_lines', 0):,}".replace(",", "."))
 cB.metric("Baris valid", f"{prep.get('valid_rows', 0):,}".replace(",", "."))
 cC.metric("Skip (PARSE)", f"{prep.get('bad_parse', 0):,}".replace(",", "."))
 cD.metric("Skip (CLEAN)", f"{prep.get('bad_clean', 0):,}".replace(",", "."))
 
-if preview_df is not None:
-    st.dataframe(preview_df, use_container_width=True, height=360)
+# ukuran file internal
+c1, c2, c3 = st.columns(3)
+c1.metric("Cleaned file (TSV) MB", f"{safe_filesize_mb(paths['cleaned_tsv']):.1f}")
+c2.metric("Log (CSV) MB", f"{safe_filesize_mb(paths['reject_csv']):.1f}")
+c3.metric("Log (TXT) MB", f"{safe_filesize_mb(paths['reject_txt']):.1f}")
 
 # =========================
 # FILTER TRIGGER
@@ -596,7 +609,7 @@ if run_filter_btn:
     terms = parse_terms(include_words_raw)
 
     with st.spinner("Filtering..."):
-        stats, passed_preview_df = run_streaming_filter(
+        stats = run_streaming_filter(
             cleaned_path=paths["cleaned_tsv"],
             passed_csv=paths["passed_csv"],
             passed_txt=paths["passed_txt"],
@@ -608,40 +621,33 @@ if run_filter_btn:
             min_krp=min_krp,
             include_terms=terms,
             chunk_size=200_000,
-            preview_rows=200,
         )
 
     st.session_state.filter_stats = stats
-    st.session_state.passed_preview_df = passed_preview_df
     st.session_state.stage = "filtered"
     st.rerun()
 
 # =========================
-# FILTERED VIEW
+# STAGE: FILTERED (RINCIAN SAJA — TANPA PREVIEW)
 # =========================
 if st.session_state.stage == "filtered":
     fs = st.session_state.filter_stats or {}
 
     st.divider()
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Valid diproses", f"{fs.get('seen_valid_rows', 0):,}".replace(",", "."))
-    c2.metric("Lolos", f"{fs.get('passed_rows', 0):,}".replace(",", "."))
-    c3.metric("Total Terjual Bulanan", fmt_id(fs.get("sum_terjual_bulanan_passed", 0)))
-    c4.metric("Total Komisi Rp", fmt_id(fs.get("sum_komisi_rp_passed", 0)))
+    st.subheader("Rincian Hasil Filter")
 
-    st.subheader("Preview Hasil (sample)")
-    if st.session_state.passed_preview_df is not None:
-        st.dataframe(st.session_state.passed_preview_df, use_container_width=True, height=360)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Valid diproses", f"{fs.get('seen_valid_rows', 0):,}".replace(",", "."))
+    m2.metric("Lolos", f"{fs.get('passed_rows', 0):,}".replace(",", "."))
+    m3.metric("Total Terjual Bulanan (lolos)", fmt_id(fs.get("sum_terjual_bulanan_passed", 0)))
+    m4.metric("Total Komisi Rp (lolos)", fmt_id(fs.get("sum_komisi_rp_passed", 0)))
 
-    with st.expander("Log Tidak Lolos (sample)"):
-        if os.path.exists(paths["reject_csv"]) and os.path.getsize(paths["reject_csv"]) > 0:
-            try:
-                sample_log = pd.read_csv(paths["reject_csv"], nrows=200)
-                st.dataframe(sample_log, use_container_width=True, height=320)
-            except Exception:
-                st.info("Log terlalu besar untuk preview. Silakan download log.")
-        else:
-            st.info("Tidak ada log.")
+    # ukuran output
+    o1, o2, o3, o4 = st.columns(4)
+    o1.metric("Hasil (CSV) MB", f"{safe_filesize_mb(paths['passed_csv']):.1f}")
+    o2.metric("Hasil (TXT) MB", f"{safe_filesize_mb(paths['passed_txt']):.1f}")
+    o3.metric("Log (CSV) MB", f"{safe_filesize_mb(paths['reject_csv']):.1f}")
+    o4.metric("Log (TXT) MB", f"{safe_filesize_mb(paths['reject_txt']):.1f}")
 
     st.divider()
     st.subheader("Export")
@@ -659,6 +665,9 @@ if st.session_state.stage == "filtered":
         mime = "text/csv" if fmt == "CSV" else "text/plain"
 
         if os.path.exists(out_path):
+            size_mb = safe_filesize_mb(out_path)
+            if size_mb > 80:
+                st.warning("File besar. Download via browser bisa berat.")
             with open(out_path, "rb") as f:
                 st.download_button("Download hasil", data=f.read(), file_name=out_file, mime=mime)
         else:
@@ -671,6 +680,9 @@ if st.session_state.stage == "filtered":
         log_mime = "text/csv" if fmt2 == "CSV" else "text/plain"
 
         if os.path.exists(log_path):
+            size_mb = safe_filesize_mb(log_path)
+            if size_mb > 80:
+                st.warning("File besar. Download via browser bisa berat.")
             with open(log_path, "rb") as f:
                 st.download_button("Download log", data=f.read(), file_name=log_file, mime=log_mime)
         else:
