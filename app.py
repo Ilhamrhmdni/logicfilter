@@ -11,8 +11,20 @@ st.title("📦 Filter & Olah Data Produk (Shopee)")
 # =========================================================
 # HEADER TETAP (ditanam di script)
 # =========================================================
-COLUMNS = [
+COLUMNS_10 = [
     "No",
+    "Link Produk",
+    "Nama Produk",
+    "Harga",
+    "Stock",
+    "Terjual Bulanan",
+    "Terjual Semua",
+    "Komisi %",
+    "Komisi Rp",
+    "Ratting",
+]
+
+COLUMNS_9_NO_NO = [
     "Link Produk",
     "Nama Produk",
     "Harga",
@@ -39,7 +51,6 @@ if "df" not in st.session_state:
 if "df_filtered" not in st.session_state:
     st.session_state.df_filtered = None
 
-
 # =========================================================
 # HELPERS
 # =========================================================
@@ -60,7 +71,7 @@ def clean_number_id(x):
     s = s.replace(" ", "")
     s = re.sub(r"[^0-9\.,]", "", s)
 
-    # umumnya titik/koma pemisah ribuan
+    # umumnya titik/koma sebagai pemisah ribuan
     s = s.replace(".", "").replace(",", "")
     return pd.to_numeric(s, errors="coerce")
 
@@ -70,28 +81,51 @@ def detect_sep(text: str) -> str:
 
 
 def read_no_header_text(text: str) -> pd.DataFrame:
+    """
+    Baca data TANPA header dari paste/upload.
+    Mendukung 2 format:
+      - 10 kolom (ada No di depan)
+      - 9 kolom (tanpa No) -> No dibuat otomatis 1..n
+    """
     text = (text or "").strip()
     if not text:
-        return pd.DataFrame(columns=COLUMNS)
+        return pd.DataFrame(columns=COLUMNS_10)
 
     sep = detect_sep(text)
-    df = pd.read_csv(
+
+    df_raw = pd.read_csv(
         StringIO(text),
         sep=sep,
         header=None,
-        names=COLUMNS,  # header ditanam di script
         engine="python",
         dtype=str,
     )
-    return df
+
+    ncols = df_raw.shape[1]
+
+    if ncols == 10:
+        df_raw.columns = COLUMNS_10
+        return df_raw
+
+    if ncols == 9:
+        df_raw.columns = COLUMNS_9_NO_NO
+        df_raw.insert(0, "No", range(1, len(df_raw) + 1))
+        return df_raw
+
+    raise ValueError(
+        f"Jumlah kolom tidak sesuai. Ditemukan {ncols} kolom. "
+        "Harus 10 kolom (dengan No) atau 9 kolom (tanpa No)."
+    )
 
 
 def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
+    # rapikan teks
     df["Link Produk"] = df["Link Produk"].astype(str).str.strip()
     df["Nama Produk"] = df["Nama Produk"].astype(str).str.strip()
 
+    # ubah kolom numerik
     for c in ["No", "Harga", "Stock", "Terjual Bulanan", "Terjual Semua", "Komisi %", "Komisi Rp", "Ratting"]:
         df[c] = df[c].apply(clean_number_id)
 
@@ -99,10 +133,19 @@ def coerce_types(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def export_csv_bytes(df: pd.DataFrame) -> bytes:
+    # CSV normal: include header + semua kolom
     return df.to_csv(index=False, sep=",").encode("utf-8")
 
-ddef export_txt_bytes(df: pd.DataFrame) -> bytes:
-    # TXT = TSV (TAB), TANPA HEADER, TANPA KOLOM "No"
+
+def export_txt_bytes(df: pd.DataFrame) -> bytes:
+    """
+    TXT sesuai permintaan kamu:
+    - TANPA header
+    - TANPA kolom "No"
+    - dipisah TAB (TSV)
+    Urutan kolom:
+    Link Produk, Nama Produk, Harga, Stock, Terjual Bulanan, Terjual Semua, Komisi %, Komisi Rp, Ratting
+    """
     cols_txt = [
         "Link Produk",
         "Nama Produk",
@@ -117,6 +160,7 @@ ddef export_txt_bytes(df: pd.DataFrame) -> bytes:
     df_txt = df[cols_txt].copy()
     return df_txt.to_csv(index=False, header=False, sep="\t").encode("utf-8")
 
+
 def fmt_id(x):
     try:
         if pd.isna(x):
@@ -124,7 +168,6 @@ def fmt_id(x):
         return f"{float(x):,.0f}".replace(",", ".")
     except Exception:
         return str(x)
-
 
 # =========================================================
 # SIDEBAR INPUT + CONTROL
@@ -143,7 +186,8 @@ with st.sidebar:
         st.session_state.raw_text = st.text_area(
             "Paste data TANPA header",
             height=240,
-            placeholder="Contoh baris (tanpa header):\n1\thttps://...\tNama Produk\t43.800\t0\t269\t50000\t0\t0\t4"
+            placeholder="Bisa 10 kolom (dengan No) atau 9 kolom (tanpa No).\n"
+                        "Contoh 9 kolom:\nhttps://...\tNama Produk\t43800\t0\t269\t50000\t0\t0\t4"
         )
     else:
         up = st.file_uploader("Upload file TANPA header", type=["txt", "csv"])
@@ -179,7 +223,12 @@ if st.session_state.stage == "input":
             st.error("Data masih kosong. Paste atau upload dulu.")
             st.stop()
 
-        df0 = read_no_header_text(st.session_state.raw_text)
+        try:
+            df0 = read_no_header_text(st.session_state.raw_text)
+        except Exception as e:
+            st.error(f"Gagal membaca data: {e}")
+            st.stop()
+
         if df0.empty:
             st.error("Data terbaca kosong. Pastikan TSV (tab) atau CSV (koma) tanpa header.")
             st.stop()
@@ -204,7 +253,7 @@ st.subheader("Preview Data (setelah dibersihkan)")
 st.dataframe(df, use_container_width=True, height=320)
 
 # =========================================================
-# FILTER MIN (INPUT ANGKA SAJA) + MANUAL TRIGGER
+# FILTER MIN (INPUT ANGKA) + MANUAL TRIGGER
 # =========================================================
 st.subheader("Hasil Filter")
 
@@ -212,13 +261,10 @@ with st.sidebar:
     st.header("Filter (MIN - input angka)")
     with st.form("filter_form"):
         min_stock = st.number_input("Stock minimal", min_value=0, value=0, step=1)
-
         min_tb = st.number_input("Terjual Bulanan minimal", min_value=0, value=0, step=1)
 
-        # angka saja (tanpa slider)
-        min_kpct = st.number_input("Komisi % minimal", min_value=0.0, value=0.0, step=1.0)
-
-        min_krp = st.number_input("Komisi Rp minimal", min_value=0.0, value=0.0, step=100.0)
+        min_kpct = st.number_input("Komisi % minimal", min_value=0.0, value=0.0, step=1.0, format="%.2f")
+        min_krp  = st.number_input("Komisi Rp minimal", min_value=0.0, value=0.0, step=100.0, format="%.0f")
 
         run_filter_btn = st.form_submit_button("🚀 JALANKAN FILTER")
 
@@ -266,4 +312,4 @@ st.download_button(
     mime=mime,
 )
 
-st.caption("TXT diexport sebagai TSV (dipisah TAB) + header.")
+st.caption("TXT diexport sebagai TSV (TAB), TANPA header, TANPA kolom No — sesuai format yang kamu minta.")
